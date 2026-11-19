@@ -499,6 +499,7 @@ static void vtOutputCallback(void *outputCallbackRefCon,
                 SCStreamConfiguration *cfg = [[SCStreamConfiguration alloc] init];
                 cfg.width = self.fbWidth;
                 cfg.height = self.fbHeight;
+                cfg.scalesToFit = YES;
                 cfg.pixelFormat = kCVPixelFormatType_32BGRA;
                 cfg.minimumFrameInterval = CMTimeMake(1, 60);
                 cfg.queueDepth = 3;
@@ -566,7 +567,15 @@ static void vtOutputCallback(void *outputCallbackRefCon,
 
     size_t w = CVPixelBufferGetWidth(pb);
     size_t h = CVPixelBufferGetHeight(pb);
-    if (w != self.fbWidth || h != self.fbHeight) return;
+    if (w < 64 || h < 64 || w > 4096 || h > 4096) return;
+    if (w != self.fbWidth || h != self.fbHeight) {
+        fprintf(stderr, "[CaptureEngine] Adaptando framebuffer %ux%u -> %zux%zu\n",
+                self.fbWidth, self.fbHeight, w, h);
+        self.fbWidth = (uint16_t)w;
+        self.fbHeight = (uint16_t)h;
+        [self resetFrameBuffers];
+        [self notifyDisplayInfo];
+    }
 
     // Keep latest pixel buffer for instant client sync & post-motion Retina sharpen
     if (_latestPB) CVPixelBufferRelease(_latestPB);

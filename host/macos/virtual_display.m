@@ -90,102 +90,97 @@
     size_t wantLogW = 1024, wantLogH = 768, wantPixW = 2048, wantPixH = 1536;
     [self targetDimensionsForPreset:preset logW:&wantLogW logH:&wantLogH pixW:&wantPixW pixH:&wantPixH];
 
-    // Wait up to 1.5s for WindowServer to publish modes
-    CGDisplayModeRef chosenMode = NULL;
-    CFArrayRef allModes = NULL;
+    // Retry up to 3 times if WindowServer initially left the display in 1x1 mode
+    for (int cfgAttempt = 0; cfgAttempt < 3; cfgAttempt++) {
+        CGDisplayModeRef chosenMode = NULL;
+        CFArrayRef allModes = NULL;
 
-    for (int attempt = 0; attempt < 15; attempt++) {
-        if (allModes) { CFRelease(allModes); allModes = NULL; }
-        NSDictionary *opts = @{ (__bridge NSString *)kCGDisplayShowDuplicateLowResolutionModes: @YES };
-        allModes = CGDisplayCopyAllDisplayModes(self.displayID, (__bridge CFDictionaryRef)opts);
-        if (allModes) {
+        for (int attempt = 0; attempt < 25; attempt++) {
+            if (allModes) { CFRelease(allModes); allModes = NULL; }
+            NSDictionary *opts = @{ (__bridge NSString *)kCGDisplayShowDuplicateLowResolutionModes: @YES };
+            allModes = CGDisplayCopyAllDisplayModes(self.displayID, (__bridge CFDictionaryRef)opts);
+            if (allModes) {
+                CFIndex count = CFArrayGetCount(allModes);
+                for (CFIndex i = 0; i < count; i++) {
+                    CGDisplayModeRef m = (CGDisplayModeRef)CFArrayGetValueAtIndex(allModes, i);
+                    size_t lw = CGDisplayModeGetWidth(m);
+                    size_t lh = CGDisplayModeGetHeight(m);
+                    size_t pw = CGDisplayModeGetPixelWidth(m);
+                    size_t ph = CGDisplayModeGetPixelHeight(m);
+                    if (lw == wantLogW && lh == wantLogH && pw == wantPixW && ph == wantPixH) {
+                        chosenMode = m;
+                        break;
+                    }
+                }
+                if (chosenMode) break;
+            }
+            usleep(100000); // 100ms
+        }
+
+        if (!chosenMode && allModes) {
             CFIndex count = CFArrayGetCount(allModes);
             for (CFIndex i = 0; i < count; i++) {
                 CGDisplayModeRef m = (CGDisplayModeRef)CFArrayGetValueAtIndex(allModes, i);
-                size_t lw = CGDisplayModeGetWidth(m);
-                size_t lh = CGDisplayModeGetHeight(m);
-                size_t pw = CGDisplayModeGetPixelWidth(m);
-                size_t ph = CGDisplayModeGetPixelHeight(m);
-                if (lw == wantLogW && lh == wantLogH && pw == wantPixW && ph == wantPixH) {
+                if (CGDisplayModeGetWidth(m) == wantLogW && CGDisplayModeGetHeight(m) == wantLogH) {
                     chosenMode = m;
-                    break;
+                    if (CGDisplayModeGetPixelWidth(m) >= wantPixW) break;
                 }
             }
-            if (chosenMode) break;
         }
-        usleep(100000); // 100ms
-    }
 
-    // Fallback: pick highest pixel-resolution matching logical size if exact HiDPI wasn't found
-    if (!chosenMode && allModes) {
-        CFIndex count = CFArrayGetCount(allModes);
-        for (CFIndex i = 0; i < count; i++) {
-            CGDisplayModeRef m = (CGDisplayModeRef)CFArrayGetValueAtIndex(allModes, i);
-            if (CGDisplayModeGetWidth(m) == wantLogW && CGDisplayModeGetHeight(m) == wantLogH) {
-                chosenMode = m;
-                if (CGDisplayModeGetPixelWidth(m) >= wantPixW) break;
+        CGDisplayConfigRef cfgRef = NULL;
+        if (CGBeginDisplayConfiguration(&cfgRef) == kCGErrorSuccess) {
+            CGConfigureDisplayMirrorOfDisplay(cfgRef, self.displayID, kCGNullDirectDisplay);
+            if (chosenMode) {
+                CGConfigureDisplayWithDisplayMode(cfgRef, self.displayID, chosenMode, NULL);
+            }
+
+            CGRect mainB = CGDisplayBounds(CGMainDisplayID());
+            int32_t ox = (int32_t)(mainB.origin.x + mainB.size.width);
+            int32_t oy = (int32_t)mainB.origin.y;
+
+            switch (position) {
+                case IPD2_POS_LEFT:
+                    ox = (int32_t)(mainB.origin.x - (CGFloat)wantLogW);
+                    oy = (int32_t)mainB.origin.y;
+                    break;
+                case IPD2_POS_TOP:
+                    ox = (int32_t)(mainB.origin.x + (mainB.size.width - (CGFloat)wantLogW) / 2.0);
+                    oy = (int32_t)(mainB.origin.y - (CGFloat)wantLogH);
+                    break;
+                case IPD2_POS_BOTTOM:
+                    ox = (int32_t)(mainB.origin.x + (mainB.size.width - (CGFloat)wantLogW) / 2.0);
+                    oy = (int32_t)(mainB.origin.y + mainB.size.height);
+                    break;
+                case IPD2_POS_RIGHT:
+                default:
+                    ox = (int32_t)(mainB.origin.x + mainB.size.width);
+                    oy = (int32_t)mainB.origin.y;
+                    break;
+            }
+
+            CGConfigureDisplayOrigin(cfgRef, self.displayID, ox, oy);
+            CGError err = CGCompleteDisplayConfiguration(cfgRef, kCGConfigureForSession);
+            if (err != kCGErrorSuccess) {
+                fprintf(stderr, "[VirtualDisplay] CGCompleteDisplayConfiguration error: %d\n", (int)err);
             }
         }
-    }
+        if (allModes) CFRelease(allModes);
 
-    CGDisplayConfigRef cfgRef = NULL;
-    if (CGBeginDisplayConfiguration(&cfgRef) == kCGErrorSuccess) {
-        // Guarantee extended desktop (never mirrored)
-        CGConfigureDisplayMirrorOfDisplay(cfgRef, self.displayID, kCGNullDirectDisplay);
+        usleep(350000); // 350ms for WindowServer commit
 
-        if (chosenMode) {
-            CGConfigureDisplayWithDisplayMode(cfgRef, self.displayID, chosenMode, NULL);
+        CGDisplayModeRef cur = CGDisplayCopyDisplayMode(self.displayID);
+        if (cur) {
+            self.logicalWidth  = (uint16_t)CGDisplayModeGetWidth(cur);
+            self.logicalHeight = (uint16_t)CGDisplayModeGetHeight(cur);
+            self.pixelWidth    = (uint16_t)CGDisplayModeGetPixelWidth(cur);
+            self.pixelHeight   = (uint16_t)CGDisplayModeGetPixelHeight(cur);
+            CGDisplayModeRelease(cur);
         }
-
-        // Compute origin relative to main display
-        CGRect mainB = CGDisplayBounds(CGMainDisplayID());
-        int32_t ox = (int32_t)(mainB.origin.x + mainB.size.width);
-        int32_t oy = (int32_t)mainB.origin.y;
-
-        switch (position) {
-            case IPD2_POS_LEFT:
-                ox = (int32_t)(mainB.origin.x - (CGFloat)wantLogW);
-                oy = (int32_t)mainB.origin.y;
-                break;
-            case IPD2_POS_TOP:
-                ox = (int32_t)(mainB.origin.x + (mainB.size.width - (CGFloat)wantLogW) / 2.0);
-                oy = (int32_t)(mainB.origin.y - (CGFloat)wantLogH);
-                break;
-            case IPD2_POS_BOTTOM:
-                ox = (int32_t)(mainB.origin.x + (mainB.size.width - (CGFloat)wantLogW) / 2.0);
-                oy = (int32_t)(mainB.origin.y + mainB.size.height);
-                break;
-            case IPD2_POS_RIGHT:
-            default:
-                ox = (int32_t)(mainB.origin.x + mainB.size.width);
-                oy = (int32_t)mainB.origin.y;
-                break;
+        if (self.logicalWidth > 1 && self.logicalHeight > 1) {
+            break;
         }
-
-        CGConfigureDisplayOrigin(cfgRef, self.displayID, ox, oy);
-        CGError err = CGCompleteDisplayConfiguration(cfgRef, kCGConfigureForSession);
-        if (err != kCGErrorSuccess) {
-            fprintf(stderr, "[VirtualDisplay] CGCompleteDisplayConfiguration error: %d\n", (int)err);
-        }
-    }
-
-    if (allModes) CFRelease(allModes);
-
-    // Give WindowServer a moment to apply the mode
-    usleep(250000);
-
-    CGDisplayModeRef cur = CGDisplayCopyDisplayMode(self.displayID);
-    if (cur) {
-        self.logicalWidth  = (uint16_t)CGDisplayModeGetWidth(cur);
-        self.logicalHeight = (uint16_t)CGDisplayModeGetHeight(cur);
-        self.pixelWidth    = (uint16_t)CGDisplayModeGetPixelWidth(cur);
-        self.pixelHeight   = (uint16_t)CGDisplayModeGetPixelHeight(cur);
-        CGDisplayModeRelease(cur);
-    } else {
-        self.logicalWidth  = (uint16_t)wantLogW;
-        self.logicalHeight = (uint16_t)wantLogH;
-        self.pixelWidth    = (uint16_t)wantPixW;
-        self.pixelHeight   = (uint16_t)wantPixH;
+        fprintf(stderr, "[VirtualDisplay] Modo ainda 1x1 na tentativa %d, tentando novamente...\n", cfgAttempt + 1);
     }
 
     self.currentPreset = preset;
@@ -209,38 +204,49 @@
     }
 
     fprintf(stderr, "[VirtualDisplay] Criando monitor virtual HiDPI 2x (Retina 4:3)...\n");
-    CGVirtualDisplayDescriptor *desc = [[CGVirtualDisplayDescriptor alloc] init];
-    desc.name = @"iPad Retina Display";
-    desc.maxPixelsWide = 2560;
-    desc.maxPixelsHigh = 1920;
-    desc.sizeInMillimeters = CGSizeMake(197, 148); // Exact 9.7" iPad 4 physical screen size
-    desc.queue = dispatch_get_main_queue();
-    desc.vendorID = 0x05AC;
-    desc.productID = 0x12AB;
-    desc.serialNum = 0x2048;
+    __block BOOL createdOK = NO;
+    void (^createBlock)(void) = ^{
+        CGVirtualDisplayDescriptor *desc = [[CGVirtualDisplayDescriptor alloc] init];
+        desc.name = @"iPad Retina Display";
+        desc.maxPixelsWide = 2560;
+        desc.maxPixelsHigh = 1920;
+        desc.sizeInMillimeters = CGSizeMake(197, 148);
+        desc.queue = dispatch_get_main_queue();
+        desc.vendorID = 0x05AC;
+        desc.productID = 0x12AB;
+        desc.serialNum = 0x2048;
 
-    self.virtualDisplay = [[CGVirtualDisplay alloc] initWithDescriptor:desc];
-    if (!self.virtualDisplay) {
-        fprintf(stderr, "[VirtualDisplay] Falha ao alocar CGVirtualDisplay.\n");
+        self.virtualDisplay = [[CGVirtualDisplay alloc] initWithDescriptor:desc];
+        if (!self.virtualDisplay) return;
+
+        CGVirtualDisplayMode *m1024 = [[CGVirtualDisplayMode alloc] initWithWidth:1024 height:768 refreshRate:60.0];
+        CGVirtualDisplayMode *m1280 = [[CGVirtualDisplayMode alloc] initWithWidth:1280 height:960 refreshRate:60.0];
+        CGVirtualDisplaySettings *settings = [[CGVirtualDisplaySettings alloc] init];
+        settings.hiDPI = 1;
+        settings.modes = @[m1024, m1280];
+
+        if (![self.virtualDisplay applySettings:settings]) {
+            self.virtualDisplay = nil;
+            return;
+        }
+        self.displayID = self.virtualDisplay.displayID;
+        self.isActive = YES;
+        createdOK = YES;
+    };
+
+    if ([NSThread isMainThread]) createBlock();
+    else dispatch_sync(dispatch_get_main_queue(), createBlock);
+
+    if (!createdOK) {
+        fprintf(stderr, "[VirtualDisplay] Falha ao criar/aplicar CGVirtualDisplay.\n");
         return NO;
     }
 
-    CGVirtualDisplayMode *m1024 = [[CGVirtualDisplayMode alloc] initWithWidth:1024 height:768 refreshRate:60.0];
-    CGVirtualDisplayMode *m1280 = [[CGVirtualDisplayMode alloc] initWithWidth:1280 height:960 refreshRate:60.0];
-    CGVirtualDisplaySettings *settings = [[CGVirtualDisplaySettings alloc] init];
-    settings.hiDPI = 1;
-    settings.modes = @[m1024, m1280];
-
-    if (![self.virtualDisplay applySettings:settings]) {
-        fprintf(stderr, "[VirtualDisplay] Falha ao aplicar CGVirtualDisplaySettings.\n");
-        self.virtualDisplay = nil;
+    if (![self applyModeAndPosition:preset position:position]) {
+        [self destroyDisplay];
         return NO;
     }
-
-    self.displayID = self.virtualDisplay.displayID;
-    self.isActive = YES;
-
-    return [self applyModeAndPosition:preset position:position];
+    return YES;
 }
 
 - (BOOL)reconfigurePreset:(uint8_t)preset position:(uint8_t)position {
