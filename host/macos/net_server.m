@@ -619,14 +619,10 @@ static NSString *mime_type_for_path(NSString *path) {
                     [self.captureEngine setMode:mode preset:preset position:pos];
                 } else if (ctrl.cmd == IPD2_CTRL_SET_PRESET) {
                     preset = ctrl.arg1;
-                    if (mode != IPD2_MODE_IDLE) {
-                        [self.captureEngine setMode:mode preset:preset position:pos];
-                    }
+                    [self.captureEngine setMode:mode preset:preset position:pos];
                 } else if (ctrl.cmd == IPD2_CTRL_SET_POSITION) {
                     pos = ctrl.arg1;
-                    if (mode == IPD2_MODE_SECOND) {
-                        [self.captureEngine setMode:mode preset:preset position:pos];
-                    }
+                    [self.captureEngine setMode:mode preset:preset position:pos];
                 } else if (ctrl.cmd == IPD2_CTRL_REQUEST_SYNC) {
                     [self.captureEngine requestFullSync];
                 }

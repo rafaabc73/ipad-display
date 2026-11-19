@@ -85,6 +85,16 @@
     [self showToolbarTemporarily];
 }
 
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    [self.glView setNeedsLayout];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (!self->_hasFirstFrame && self.connection.isConnected) {
+            [self.connection sendControlCmd:IPD2_CTRL_REQUEST_SYNC arg1:0];
+        }
+    });
+}
+
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];
     [self.autoHideTimer invalidate];
@@ -327,7 +337,7 @@
 - (void)refreshHud {
     uint16_t w = self.glView.retinaWidth;
     uint16_t h = self.glView.retinaHeight;
-    NSString *res = (w > 0 && h > 0) ? [NSString stringWithFormat:@"%u×%u", w, h] : @"Retina";
+    NSString *res = (w > 0 && h > 0) ? [NSString stringWithFormat:@"%u×%u", w, h] : [NSString stringWithFormat:@"GL %dx%d", self.glView.backingWidth, self.glView.backingHeight];
     self.hudLabel.text = [NSString stringWithFormat:@"%@ • %u FPS • %.1fms", res, _measuredFPS, _lastRttMs];
 }
 

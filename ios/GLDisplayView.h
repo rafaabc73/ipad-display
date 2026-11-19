@@ -8,6 +8,8 @@
 @property (nonatomic, readonly) CGRect activeImageRectInPoints;
 @property (nonatomic, readonly) uint16_t retinaWidth;
 @property (nonatomic, readonly) uint16_t retinaHeight;
+@property (nonatomic, readonly) int backingWidth;
+@property (nonatomic, readonly) int backingHeight;
 
 - (void)applyTileBatchData:(NSData *)payload flags:(uint8_t)flags tileCount:(uint16_t)tileCount;
 - (void)displayH264PixelBuffer:(CVPixelBufferRef)pixelBuffer;

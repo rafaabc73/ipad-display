@@ -136,8 +136,13 @@
     return op;
   }
 
-  // ---- Renderizador WebGL 1.0 Hardware (PowerVR SGX554MP4 / Metal / ANGLE) ----
+  // ---- Renderizador WebGL 1.0 Hardware + Fallback automático Canvas 2D ----
   var gl = null;
+  var ctx2d = null;
+  var offCanvas = null;
+  var offCtx = null;
+  var offImgData = null;
+  var rendererInited = false;
   var glProgram = null;
   var retinaTex = null;
   var motionTex = null;
@@ -149,10 +154,31 @@
   var needsDraw = false;
   var renderViewport = { x: 0, y: 0, w: 1, h: 1 };
 
-  function initWebGL() {
-    var opts = { alpha: false, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: false, powerPreference: 'high-performance' };
-    gl = glCanvas.getContext('webgl', opts) || glCanvas.getContext('experimental-webgl', opts);
-    if (!gl) return false;
+  function initCanvas2DFallback() {
+    gl = null;
+    ctx2d = glCanvas.getContext('2d');
+    if (!offCanvas) {
+      offCanvas = document.createElement('canvas');
+      offCtx = offCanvas.getContext('2d');
+    }
+    resizeCanvas();
+  }
+
+  function ensureRenderer() {
+    if (rendererInited) return;
+    rendererInited = true;
+    resizeCanvas();
+
+    var opts = { alpha: false, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: false };
+    try {
+      gl = glCanvas.getContext('webgl', opts) || glCanvas.getContext('experimental-webgl', opts);
+    } catch (e) {
+      gl = null;
+    }
+    if (!gl) {
+      initCanvas2DFallback();
+      return;
+    }
 
     var vsSrc =
       'attribute vec2 aPos;' +
@@ -182,13 +208,25 @@
       var sh = gl.createShader(type);
       gl.shaderSource(sh, src);
       gl.compileShader(sh);
+      if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) return null;
       return sh;
     }
 
+    var vs = compile(gl.VERTEX_SHADER, vsSrc);
+    var fs = compile(gl.FRAGMENT_SHADER, fsSrc);
+    if (!vs || !fs) {
+      initCanvas2DFallback();
+      return;
+    }
+
     glProgram = gl.createProgram();
-    gl.attachShader(glProgram, compile(gl.VERTEX_SHADER, vsSrc));
-    gl.attachShader(glProgram, compile(gl.FRAGMENT_SHADER, fsSrc));
+    gl.attachShader(glProgram, vs);
+    gl.attachShader(glProgram, fs);
     gl.linkProgram(glProgram);
+    if (!gl.getProgramParameter(glProgram, gl.LINK_STATUS)) {
+      initCanvas2DFallback();
+      return;
+    }
     gl.useProgram(glProgram);
 
     var verts = new Float32Array([
@@ -215,7 +253,6 @@
     retinaTex = createNPOTTexture();
     motionTex = createNPOTTexture();
     resizeCanvas();
-    return true;
   }
 
   function createNPOTTexture() {
@@ -274,15 +311,33 @@
   }
 
   function drawGL() {
-    if (!gl || (!retinaW && !motionW)) return;
+    if (!retinaW && !motionW) return;
     var srcW = activeIsMotion ? motionW : retinaW;
     var srcH = activeIsMotion ? motionH : retinaH;
     if (!srcW || !srcH) return;
 
     updateAspectLayout();
+
+    if (!gl && ctx2d && offCanvas) {
+      var dpr = window.devicePixelRatio || 1;
+      ctx2d.fillStyle = '#000000';
+      ctx2d.fillRect(0, 0, glCanvas.width, glCanvas.height);
+      ctx2d.drawImage(
+        offCanvas,
+        0, 0, retinaW, retinaH,
+        Math.round(renderViewport.x * dpr),
+        Math.round(renderViewport.y * dpr),
+        Math.round(renderViewport.w * dpr),
+        Math.round(renderViewport.h * dpr)
+      );
+      return;
+    }
+    if (!gl) return;
+
     var sx = fillScreen ? 1.0 : (renderViewport.w / window.innerWidth);
     var sy = fillScreen ? 1.0 : (renderViewport.h / window.innerHeight);
 
+    gl.viewport(0, 0, glCanvas.width, glCanvas.height);
     gl.clearColor(0, 0, 0, 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.useProgram(glProgram);
@@ -453,7 +508,9 @@
   }
 
   function handleTileBatch(ab, dv, flags, tileCount, seq) {
-    if (!gl || currentMode === MODE_IDLE) return;
+    if (currentMode === MODE_IDLE) return;
+    ensureRenderer();
+    if (!gl && !ctx2d) return;
 
     var frameW = dv.getUint16(16, true);
     var frameH = dv.getUint16(18, true);
@@ -461,7 +518,54 @@
     var srcU8 = new Uint8Array(ab);
     var off = 20;
 
-    if (isHalfMotion) {
+    if (!gl && ctx2d) {
+      // Canvas 2D fallback (sempre funciona mesmo sem WebGL)
+      if (!isHalfMotion) {
+        if (frameW !== retinaW || frameH !== retinaH) {
+          retinaW = frameW;
+          retinaH = frameH;
+          offCanvas.width = retinaW;
+          offCanvas.height = retinaH;
+          offImgData = offCtx.createImageData(128, 128);
+          updateAspectLayout();
+        }
+        for (var ci = 0; ci < tileCount; ci++) {
+          if (off + 14 > ab.byteLength) break;
+          var cx = dv.getUint16(off, true);
+          var cy = dv.getUint16(off + 2, true);
+          var cw = dv.getUint16(off + 4, true);
+          var ch = dv.getUint16(off + 6, true);
+          var cenc = dv.getUint8(off + 8);
+          var clen = dv.getUint32(off + 10, true);
+          off += 14;
+          if (off + clen > ab.byteLength) break;
+          var craw = cw * ch * 4;
+          if (craw > tileDecodeBuf.length) tileDecodeBuf = new Uint8Array(craw);
+          var ok2d = false;
+          if (cenc === ENC_LZ4_BGRA) {
+            ok2d = (lz4Decompress(srcU8, off, clen, tileDecodeBuf, craw) === craw);
+          } else if (cenc === ENC_RAW_BGRA && clen === craw) {
+            tileDecodeBuf.set(srcU8.subarray(off, off + clen), 0);
+            ok2d = true;
+          }
+          if (ok2d) {
+            var idata = (cw === 128 && ch === 128) ? offImgData : offCtx.createImageData(cw, ch);
+            var dd = idata.data;
+            for (var p = 0; p < craw; p += 4) {
+              dd[p]     = tileDecodeBuf[p + 2];
+              dd[p + 1] = tileDecodeBuf[p + 1];
+              dd[p + 2] = tileDecodeBuf[p];
+              dd[p + 3] = 255;
+            }
+            offCtx.putImageData(idata, cx, cy);
+          }
+          off += clen;
+        }
+        activeIsMotion = false;
+      } else {
+        sendFrameAck(seq);
+      }
+    } else if (isHalfMotion) {
       gl.bindTexture(gl.TEXTURE_2D, motionTex);
       gl.pixelStorei(gl.UNPACK_ALIGNMENT, 2);
       if (frameW !== motionW || frameH !== motionH) {
@@ -625,12 +729,19 @@
       : 'Iniciando Espelhamento Retina...';
     btnSwitchMode.textContent = (mode === MODE_SECOND) ? 'Ir p/ Espelho' : 'Ir p/ 2ª Tela';
 
+    ensureRenderer();
     resizeCanvas();
     showToolbarTemporary();
 
     sendControl(CTRL_SET_POSITION, currentPos);
     sendControl(CTRL_SET_PRESET, currentPreset);
     sendControl(CTRL_SET_MODE, mode);
+    setTimeout(function () {
+      if (!hasFirstFrame && currentMode === mode) {
+        sendControl(CTRL_SET_MODE, mode);
+        sendControl(CTRL_REQUEST_SYNC, 0);
+      }
+    }, 1500);
   }
 
   function returnToMenu() {
@@ -918,8 +1029,7 @@
     setTimeout(resizeCanvas, 200);
   }, false);
 
-  // Inicialização
-  initWebGL();
+  // Inicialização (WebGL/Canvas2D inicializa sob demanda ao abrir displayView visível)
   connectWS();
   window.requestAnimationFrame(renderLoop);
 })();

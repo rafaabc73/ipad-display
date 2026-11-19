@@ -17,6 +17,9 @@ static NetServer *gServer = nil;
 @implementation MenuBarDelegate
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
+    if (!CGPreflightScreenCaptureAccess()) {
+        CGRequestScreenCaptureAccess();
+    }
     self.statusItem = [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
     if (@available(macOS 11.0, *)) {
         NSImage *img = [NSImage imageWithSystemSymbolName:@"ipad.landscape" accessibilityDescription:@"iPad Display"];

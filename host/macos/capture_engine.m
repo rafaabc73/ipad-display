@@ -455,6 +455,8 @@ static void vtOutputCallback(void *outputCallbackRefCon,
         }
 
         if (mode == IPD2_MODE_IDLE) {
+            self.currentPreset = preset;
+            self.currentPosition = position;
             dispatch_sync(self.captureQueue, ^{
                 [self teardownH264Encoder];
                 if (self->_latestPB) {

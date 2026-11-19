@@ -86,7 +86,8 @@ static void vtDecodeCallback(void *decompressionOutputRefCon,
     // Apple A6X hardware decoder outputs NV12 video-range directly into OpenGL ES compatible IOSurface!
     NSDictionary *destAttrs = @{
         (__bridge NSString *)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
-        (__bridge NSString *)kCVPixelBufferOpenGLESCompatibilityKey: @YES
+        (__bridge NSString *)kCVPixelBufferOpenGLESCompatibilityKey: @YES,
+        (__bridge NSString *)kCVPixelBufferIOSurfacePropertiesKey: @{}
     };
 
     VTDecompressionOutputCallbackRecord cb;

@@ -7,6 +7,7 @@
 #include <string.h>
 
 @interface GLDisplayView () {
+    CAEAGLLayer *_eaglLayer;
     EAGLContext *_context;
     GLuint _framebuffer;
     GLuint _colorRenderbuffer;
@@ -17,6 +18,10 @@
     GLuint _yuvProgram;
     GLuint _cursorProgram;
     GLuint _quadVBO;
+
+    GLint _bgraLocScale, _bgraLocOffset, _bgraLocTex;
+    GLint _yuvLocScale, _yuvLocOffset, _yuvLocY, _yuvLocUV;
+    GLint _curLocScale, _curLocOffset, _curLocTex;
 
     GLuint _retinaTex;
     GLuint _cursorTex;
@@ -69,8 +74,14 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
     glBindAttribLocation(prog, 0, "aPos");
     glBindAttribLocation(prog, 1, "aTex");
     glLinkProgram(prog);
+    GLint linked = 0;
+    glGetProgramiv(prog, GL_LINK_STATUS, &linked);
     glDeleteShader(vs);
     glDeleteShader(fs);
+    if (!linked) {
+        glDeleteProgram(prog);
+        return 0;
+    }
     return prog;
 }
 
@@ -85,12 +96,12 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
     if (self) {
         self.opaque = YES;
         self.backgroundColor = [UIColor blackColor];
-        self.contentScaleFactor = [UIScreen mainScreen].scale; // 2.0 on iPad 4 -> exact 2048x1536!
+        self.contentScaleFactor = [UIScreen mainScreen].scale;
 
-        CAEAGLLayer *eaglLayer = (CAEAGLLayer *)self.layer;
-        eaglLayer.opaque = YES;
-        eaglLayer.contentsScale = self.contentScaleFactor;
-        eaglLayer.drawableProperties = @{
+        _eaglLayer = (CAEAGLLayer *)self.layer;
+        _eaglLayer.opaque = YES;
+        _eaglLayer.contentsScale = self.contentScaleFactor;
+        _eaglLayer.drawableProperties = @{
             kEAGLDrawablePropertyRetainedBacking: @NO,
             kEAGLDrawablePropertyColorFormat: kEAGLColorFormatRGBA8
         };
@@ -113,6 +124,8 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
 
 - (uint16_t)retinaWidth { return _retinaW; }
 - (uint16_t)retinaHeight { return _retinaH; }
+- (int)backingWidth { return (int)_backingWidth; }
+- (int)backingHeight { return (int)_backingHeight; }
 
 - (void)setFillScreen:(BOOL)fillScreen {
     _fillScreen = fillScreen;
@@ -123,8 +136,7 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
 
 - (void)layoutSubviews {
     [super layoutSubviews];
-    CAEAGLLayer *eaglLayer = (CAEAGLLayer *)self.layer;
-    eaglLayer.contentsScale = [UIScreen mainScreen].scale;
+    _eaglLayer.contentsScale = [UIScreen mainScreen].scale;
     dispatch_async(_glQueue, ^{
         self->_needsResize = YES;
         [self rebuildRenderbufferLocked];
@@ -141,7 +153,6 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
         glGenRenderbuffers(1, &self->_colorRenderbuffer);
         glBindFramebuffer(GL_FRAMEBUFFER, self->_framebuffer);
         glBindRenderbuffer(GL_RENDERBUFFER, self->_colorRenderbuffer);
-        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, self->_colorRenderbuffer);
 
         // Fullscreen quad VBO (pos.xy, tex.uv)
         static const GLfloat quadVerts[] = {
@@ -165,13 +176,14 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
             "  gl_Position = vec4(aPos * uScale + uOffset, 0.0, 1.0);"
             "}";
 
-        // BGRA Retina texture shader (GL_BGRA_EXT already delivers RGBA in correct channels!)
+        // Core OpenGL ES 2.0 GL_RGBA texture with zero-cost GPU BGRA->RGBA swizzle!
         const char *fsBGRA =
             "precision mediump float;"
             "varying vec2 vTex;"
             "uniform sampler2D uTex;"
             "void main() {"
-            "  gl_FragColor = vec4(texture2D(uTex, vTex).rgb, 1.0);"
+            "  vec4 c = texture2D(uTex, vTex);"
+            "  gl_FragColor = vec4(c.b, c.g, c.r, 1.0);"
             "}";
 
         // Zero-copy BT.709 Video-Range NV12 YUV->RGB shader (hardware H.264 @ 60 FPS!)
@@ -202,6 +214,23 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
         self->_yuvProgram = link_program(vs, fsYUV);
         self->_cursorProgram = link_program(vs, fsCursor);
 
+        if (self->_bgraProgram) {
+            self->_bgraLocScale  = glGetUniformLocation(self->_bgraProgram, "uScale");
+            self->_bgraLocOffset = glGetUniformLocation(self->_bgraProgram, "uOffset");
+            self->_bgraLocTex    = glGetUniformLocation(self->_bgraProgram, "uTex");
+        }
+        if (self->_yuvProgram) {
+            self->_yuvLocScale  = glGetUniformLocation(self->_yuvProgram, "uScale");
+            self->_yuvLocOffset = glGetUniformLocation(self->_yuvProgram, "uOffset");
+            self->_yuvLocY      = glGetUniformLocation(self->_yuvProgram, "uY");
+            self->_yuvLocUV     = glGetUniformLocation(self->_yuvProgram, "uUV");
+        }
+        if (self->_cursorProgram) {
+            self->_curLocScale  = glGetUniformLocation(self->_cursorProgram, "uScale");
+            self->_curLocOffset = glGetUniformLocation(self->_cursorProgram, "uOffset");
+            self->_curLocTex    = glGetUniformLocation(self->_cursorProgram, "uTex");
+        }
+
         glGenTextures(1, &self->_retinaTex);
         glBindTexture(GL_TEXTURE_2D, self->_retinaTex);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -222,7 +251,6 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
                                              kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
     CGColorSpaceRelease(cs);
     if (ctx) {
-        // Flip CoreGraphics coordinates so tip is at (2, 2) top-left
         CGContextTranslateCTM(ctx, 0, ch);
         CGContextScaleCTM(ctx, 1.0, -1.0);
 
@@ -258,19 +286,21 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
 }
 
 - (void)rebuildRenderbufferLocked {
-    if (!_context) return;
-    [EAGLContext setCurrentContext:_context];
+    if (!_context || !_eaglLayer) return;
+    // IMPORTANT: renderbufferStorage:fromDrawable: MUST run on the thread where _context is current!
+    if (![EAGLContext setCurrentContext:_context]) return;
+
     glBindFramebuffer(GL_FRAMEBUFFER, _framebuffer);
     glBindRenderbuffer(GL_RENDERBUFFER, _colorRenderbuffer);
-
-    __block BOOL ok = NO;
-    dispatch_sync(dispatch_get_main_queue(), ^{
-        ok = [self->_context renderbufferStorage:GL_RENDERBUFFER fromDrawable:(CAEAGLLayer *)self.layer];
-    });
+    BOOL ok = [_context renderbufferStorage:GL_RENDERBUFFER fromDrawable:_eaglLayer];
     if (ok) {
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, _colorRenderbuffer);
         glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_WIDTH, &_backingWidth);
         glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_HEIGHT, &_backingHeight);
-        _needsResize = NO;
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE &&
+            _backingWidth > 0 && _backingHeight > 0) {
+            _needsResize = NO;
+        }
     }
 }
 
@@ -312,7 +342,8 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
         [self releaseVideoTexturesLocked];
         if (!self->_context) return;
         [EAGLContext setCurrentContext:self->_context];
-        if (self->_needsResize) [self rebuildRenderbufferLocked];
+        if (self->_needsResize || self->_backingWidth <= 0) [self rebuildRenderbufferLocked];
+        if (self->_backingWidth <= 0 || self->_backingHeight <= 0) return;
         glBindFramebuffer(GL_FRAMEBUFFER, self->_framebuffer);
         glViewport(0, 0, self->_backingWidth, self->_backingHeight);
         glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
@@ -324,11 +355,11 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
 
 - (void)applyTileBatchData:(NSData *)payload flags:(uint8_t)flags tileCount:(uint16_t)tileCount {
     if (!payload || payload.length < sizeof(IPD2TileBatchHeader)) return;
-    if (flags & IPD2_TILE_FLAG_HALF_RES) return; // Native App uses HW H.264 for motion!
+    if (flags & IPD2_TILE_FLAG_HALF_RES) return; // Native App uses HW H.264 for motion
 
     dispatch_async(_glQueue, ^{
         if (!self->_context) return;
-        [EAGLContext setCurrentContext:self->_context];
+        if (![EAGLContext setCurrentContext:self->_context]) return;
         if (self->_needsResize || self->_backingWidth <= 0) [self rebuildRenderbufferLocked];
 
         const uint8_t *bytes = (const uint8_t *)payload.bytes;
@@ -342,8 +373,9 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
         if (bh.frameW > 0 && bh.frameH > 0 && (bh.frameW != self->_retinaW || bh.frameH != self->_retinaH)) {
             self->_retinaW = bh.frameW;
             self->_retinaH = bh.frameH;
+            // Core OpenGL ES 2.0 GL_RGBA (swizzled in fragment shader — zero extension quirks!)
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, self->_retinaW, self->_retinaH,
-                         0, GL_BGRA_EXT, GL_UNSIGNED_BYTE, NULL);
+                         0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
         }
 
         size_t off = sizeof(IPD2TileBatchHeader);
@@ -353,6 +385,11 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
             memcpy(&th, bytes + off, sizeof(th));
             off += sizeof(IPD2TileHeader);
             if (off + th.dataLen > totalLen) break;
+
+            if ((uint32_t)th.x + th.w > self->_retinaW || (uint32_t)th.y + th.h > self->_retinaH) {
+                off += th.dataLen;
+                continue;
+            }
 
             size_t rawSize = (size_t)th.w * (size_t)th.h * 4;
             if (rawSize > self->_lz4DecodeBufSize) {
@@ -367,11 +404,11 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
                                               (int)rawSize);
                 if (dec == (int)rawSize) {
                     glTexSubImage2D(GL_TEXTURE_2D, 0, th.x, th.y, th.w, th.h,
-                                    GL_BGRA_EXT, GL_UNSIGNED_BYTE, self->_lz4DecodeBuf);
+                                    GL_RGBA, GL_UNSIGNED_BYTE, self->_lz4DecodeBuf);
                 }
             } else if (th.encoding == IPD2_ENC_RAW_BGRA && th.dataLen == rawSize) {
                 glTexSubImage2D(GL_TEXTURE_2D, 0, th.x, th.y, th.w, th.h,
-                                GL_BGRA_EXT, GL_UNSIGNED_BYTE, bytes + off);
+                                GL_RGBA, GL_UNSIGNED_BYTE, bytes + off);
             }
             off += th.dataLen;
         }
@@ -392,26 +429,35 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
             CVPixelBufferRelease(pixelBuffer);
             return;
         }
-        [EAGLContext setCurrentContext:self->_context];
+        if (![EAGLContext setCurrentContext:self->_context]) {
+            CVPixelBufferRelease(pixelBuffer);
+            return;
+        }
         if (self->_needsResize || self->_backingWidth <= 0) [self rebuildRenderbufferLocked];
 
         [self releaseVideoTexturesLocked];
 
-        size_t w = CVPixelBufferGetWidth(pixelBuffer);
-        size_t h = CVPixelBufferGetHeight(pixelBuffer);
-        self->_videoW = (uint16_t)w;
-        self->_videoH = (uint16_t)h;
+        size_t w0 = CVPixelBufferGetWidthOfPlane(pixelBuffer, 0);
+        size_t h0 = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0);
+        size_t w1 = CVPixelBufferGetWidthOfPlane(pixelBuffer, 1);
+        size_t h1 = CVPixelBufferGetHeightOfPlane(pixelBuffer, 1);
+        if (w0 == 0 || h0 == 0 || w1 == 0 || h1 == 0) {
+            CVPixelBufferRelease(pixelBuffer);
+            return;
+        }
+        self->_videoW = (uint16_t)w0;
+        self->_videoH = (uint16_t)h0;
 
         glActiveTexture(GL_TEXTURE0);
         CVReturn r1 = CVOpenGLESTextureCacheCreateTextureFromImage(
             kCFAllocatorDefault, self->_textureCache, pixelBuffer, NULL,
-            GL_TEXTURE_2D, GL_LUMINANCE, (GLsizei)w, (GLsizei)h,
+            GL_TEXTURE_2D, GL_LUMINANCE, (GLsizei)w0, (GLsizei)h0,
             GL_LUMINANCE, GL_UNSIGNED_BYTE, 0, &self->_lumaTexture
         );
         glActiveTexture(GL_TEXTURE1);
         CVReturn r2 = CVOpenGLESTextureCacheCreateTextureFromImage(
             kCFAllocatorDefault, self->_textureCache, pixelBuffer, NULL,
-            GL_TEXTURE_2D, GL_LUMINANCE_ALPHA, (GLsizei)(w / 2), (GLsizei)(h / 2),
+            GL_TEXTURE_2D, GL_LUMINANCE_ALPHA, (GLsizei)w1, (GLsizei)h1,
             GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, 1, &self->_chromaTexture
         );
 
@@ -448,8 +494,12 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
 }
 
 - (void)renderCurrentFrameLocked {
-    if (!_context || _backingWidth <= 0 || _backingHeight <= 0) return;
-    [EAGLContext setCurrentContext:_context];
+    if (!_context) return;
+    if (_needsResize || _backingWidth <= 0 || _backingHeight <= 0) {
+        [self rebuildRenderbufferLocked];
+    }
+    if (_backingWidth <= 0 || _backingHeight <= 0) return;
+    if (![EAGLContext setCurrentContext:_context]) return;
 
     BOOL useVideo = (_showVideoLayer && _hasVideoContent && _lumaTexture && _chromaTexture);
     if (!useVideo && !_hasRetinaContent) return;
@@ -471,7 +521,6 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
         }
     }
 
-    // Store active image rect in UIKit points for accurate multi-touch coordinate mapping
     CGFloat scale = [UIScreen mainScreen].scale;
     CGFloat viewW = (CGFloat)_backingWidth / scale;
     CGFloat viewH = (CGFloat)_backingHeight / scale;
@@ -491,42 +540,39 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 16, (const void *)8);
 
-    if (useVideo) {
+    if (useVideo && _yuvProgram) {
         glUseProgram(_yuvProgram);
-        glUniform2f(glGetUniformLocation(_yuvProgram, "uScale"), sx, sy);
-        glUniform2f(glGetUniformLocation(_yuvProgram, "uOffset"), 0.0f, 0.0f);
+        glUniform2f(_yuvLocScale, sx, sy);
+        glUniform2f(_yuvLocOffset, 0.0f, 0.0f);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(CVOpenGLESTextureGetTarget(_lumaTexture), CVOpenGLESTextureGetName(_lumaTexture));
-        glUniform1i(glGetUniformLocation(_yuvProgram, "uY"), 0);
+        glUniform1i(_yuvLocY, 0);
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(CVOpenGLESTextureGetTarget(_chromaTexture), CVOpenGLESTextureGetName(_chromaTexture));
-        glUniform1i(glGetUniformLocation(_yuvProgram, "uUV"), 1);
+        glUniform1i(_yuvLocUV, 1);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    } else {
+    } else if (_bgraProgram) {
         glUseProgram(_bgraProgram);
-        glUniform2f(glGetUniformLocation(_bgraProgram, "uScale"), sx, sy);
-        glUniform2f(glGetUniformLocation(_bgraProgram, "uOffset"), 0.0f, 0.0f);
+        glUniform2f(_bgraLocScale, sx, sy);
+        glUniform2f(_bgraLocOffset, 0.0f, 0.0f);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, _retinaTex);
-        // Exact 1:1 Retina pixel match uses GL_NEAREST for razor-sharp native iPad clarity!
         BOOL exact = (!self.fillScreen && _retinaW == _backingWidth && _retinaH == _backingHeight);
         GLint filt = exact ? GL_NEAREST : GL_LINEAR;
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filt);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filt);
-        glUniform1i(glGetUniformLocation(_bgraProgram, "uTex"), 0);
+        glUniform1i(_bgraLocTex, 0);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     }
 
-    // Hardware-composited 60 Hz Retina cursor sprite overlay!
-    if (_cursorVisible && _cursorTex) {
+    if (_cursorVisible && _cursorTex && _cursorProgram) {
         glEnable(GL_BLEND);
         glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
         glUseProgram(_cursorProgram);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, _cursorTex);
-        glUniform1i(glGetUniformLocation(_cursorProgram, "uTex"), 0);
+        glUniform1i(_curLocTex, 0);
 
-        // Cursor size in NDC (40x56 Retina px)
         float cwNdc = 40.0f / (float)_backingWidth;
         float chNdc = 56.0f / (float)_backingHeight;
         float tipNdcX = ((_cursorX * 2.0f - 1.0f) * sx);
@@ -534,8 +580,8 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
         float offX = tipNdcX + cwNdc - (6.0f / (float)_backingWidth);
         float offY = tipNdcY - chNdc + (6.0f / (float)_backingHeight);
 
-        glUniform2f(glGetUniformLocation(_cursorProgram, "uScale"), cwNdc, chNdc);
-        glUniform2f(glGetUniformLocation(_cursorProgram, "uOffset"), offX, offY);
+        glUniform2f(_curLocScale, cwNdc, chNdc);
+        glUniform2f(_curLocOffset, offX, offY);
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         glDisable(GL_BLEND);
     }
