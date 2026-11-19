@@ -36,6 +36,7 @@ if [ "$NEED_BUILD" -eq 1 ]; then
     -framework CoreVideo \
     -framework VideoToolbox \
     -framework QuartzCore \
+    -framework IOKit \
     -o bin/ipad-display-macos
   echo "✓ Motor compilado!"
 fi

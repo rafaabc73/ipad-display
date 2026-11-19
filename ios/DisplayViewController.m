@@ -88,7 +88,10 @@
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
     [self.glView setNeedsLayout];
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    if (self.connection.isConnected) {
+        [self.connection sendControlCmd:IPD2_CTRL_REQUEST_SYNC arg1:0];
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (!self->_hasFirstFrame && self.connection.isConnected) {
             [self.connection sendControlCmd:IPD2_CTRL_REQUEST_SYNC arg1:0];
         }

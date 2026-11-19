@@ -29,6 +29,7 @@ clang -O3 -Wall -Wextra -Wno-unused-parameter -fobjc-arc \
   -framework CoreVideo \
   -framework VideoToolbox \
   -framework QuartzCore \
+  -framework IOKit \
   -o bin/ipad-display-macos
 echo "✓ bin/ipad-display-macos pronto!"
 

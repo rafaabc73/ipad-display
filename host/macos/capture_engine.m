@@ -4,6 +4,7 @@
 #import <CoreVideo/CoreVideo.h>
 #import <VideoToolbox/VideoToolbox.h>
 #import <QuartzCore/QuartzCore.h>
+#import <IOKit/pwr_mgt/IOPMLib.h>
 #import "../../shared/lz4/lz4.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,6 +40,9 @@ static uint64_t now_us(void) {
     BOOL _inMotionBurst;
     BOOL _needsSharpen;
     BOOL _forceFullSync;
+    BOOL _sentValidNonBlackFrame;
+    int  _consecutiveHeavyFrames;
+    IOPMAssertionID _sleepAssertionID;
 
     float _lastCursorX;
     float _lastCursorY;
@@ -249,9 +253,9 @@ static void vtOutputCallback(void *outputCallbackRefCon,
     VTSessionSetProperty(_vtSession, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue);
     VTSessionSetProperty(_vtSession, kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_4_1);
     VTSessionSetProperty(_vtSession, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse);
-    VTSessionSetProperty(_vtSession, kVTCompressionPropertyKey_MaxKeyFrameInterval, (__bridge CFTypeRef)@(120));
+    VTSessionSetProperty(_vtSession, kVTCompressionPropertyKey_MaxKeyFrameInterval, (__bridge CFTypeRef)@(30));
     VTSessionSetProperty(_vtSession, kVTCompressionPropertyKey_ExpectedFrameRate, (__bridge CFTypeRef)@(60));
-    VTSessionSetProperty(_vtSession, kVTCompressionPropertyKey_AverageBitRate, (__bridge CFTypeRef)@(16000000)); // 16 Mbps crisp USB H.264
+    VTSessionSetProperty(_vtSession, kVTCompressionPropertyKey_AverageBitRate, (__bridge CFTypeRef)@(24000000)); // 24 Mbps crisp USB H.264
     VTSessionSetProperty(_vtSession, kVTCompressionPropertyKey_ColorPrimaries, kCVImageBufferColorPrimaries_ITU_R_709_2);
     VTSessionSetProperty(_vtSession, kVTCompressionPropertyKey_TransferFunction, kCVImageBufferTransferFunction_ITU_R_709_2);
     VTSessionSetProperty(_vtSession, kVTCompressionPropertyKey_YCbCrMatrix, kCVImageBufferYCbCrMatrix_ITU_R_709_2);
@@ -353,10 +357,78 @@ static void vtOutputCallback(void *outputCallbackRefCon,
         _latestPB = NULL;
     }
     _forceFullSync = YES;
+    _sentValidNonBlackFrame = NO;
+    _consecutiveHeavyFrames = 0;
     _inMotionBurst = NO;
     _needsSharpen = NO;
     _forceH264Keyframe = YES;
     _sentH264ConfigToCurrent = NO;
+}
+
+- (void)updateSleepAssertion:(BOOL)keepAwake {
+    if (keepAwake && _sleepAssertionID == 0) {
+        IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleDisplaySleep,
+                                    kIOPMAssertionLevelOn,
+                                    CFSTR("iPad Display Pro Active Session"),
+                                    &_sleepAssertionID);
+    } else if (!keepAwake && _sleepAssertionID != 0) {
+        IOPMAssertionRelease(_sleepAssertionID);
+        _sleepAssertionID = 0;
+    }
+}
+
+// Captures a guaranteed Retina desktop snapshot via CoreGraphics if SCStream's initial frame was still black
+- (void)captureInitialDesktopSnapshotIfNeeded:(CGDirectDisplayID)displayID generation:(NSUInteger)gen {
+    dispatch_async(self.captureQueue, ^{
+        if (gen != self.generation || self.currentMode == IPD2_MODE_IDLE) return;
+        if (self->_sentValidNonBlackFrame) return;
+
+        CGImageRef img = CGDisplayCreateImage(displayID);
+        if (!img) return;
+
+        int w = self.fbWidth;
+        int h = self.fbHeight;
+        if (w < 64 || h < 64) { CGImageRelease(img); return; }
+
+        size_t stride = (size_t)w * 4;
+        uint8_t *buf = (uint8_t *)calloc(1, stride * (size_t)h);
+        if (!buf) { CGImageRelease(img); return; }
+
+        CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+        CGContextRef ctx = CGBitmapContextCreate(buf, w, h, 8, stride, cs,
+                                                 kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
+        CGColorSpaceRelease(cs);
+        if (ctx) {
+            CGContextSetInterpolationQuality(ctx, kCGInterpolationHigh);
+            CGContextDrawImage(ctx, CGRectMake(0, 0, w, h), img);
+            CGContextRelease(ctx);
+
+            // Verify snapshot is not all-black
+            BOOL nonBlack = NO;
+            for (int sy = 1; sy <= 4 && !nonBlack; sy++) {
+                int py = (h * sy) / 5;
+                for (int sx = 1; sx <= 4; sx++) {
+                    int px = (w * sx) / 5;
+                    const uint8_t *p = buf + (size_t)py * stride + (size_t)px * 4;
+                    if (p[0] > 4 || p[1] > 4 || p[2] > 4) { nonBlack = YES; break; }
+                }
+            }
+
+            if (nonBlack) {
+                int cols = (w + TILE_SIZE - 1) / TILE_SIZE;
+                int rows = (h + TILE_SIZE - 1) / TILE_SIZE;
+                uint8_t dirty[512];
+                memset(dirty, 1, (size_t)(cols * rows));
+                self->_sentValidNonBlackFrame = YES;
+                self->_forceFullSync = NO;
+                [self emitDirtyRetinaTilesFromBase:buf stride:stride width:w height:h
+                                             dirty:dirty cols:cols rows:rows fullSync:YES];
+                fprintf(stderr, "[CaptureEngine] Snapshot inicial Retina %dx%d enviado com sucesso!\n", w, h);
+            }
+        }
+        free(buf);
+        CGImageRelease(img);
+    });
 }
 
 - (void)fillDisplayInfo:(IPD2DisplayInfo *)info transport:(uint8_t)transport rttTenthMs:(uint16_t)rtt {
@@ -457,6 +529,7 @@ static void vtOutputCallback(void *outputCallbackRefCon,
         if (mode == IPD2_MODE_IDLE) {
             self.currentPreset = preset;
             self.currentPosition = position;
+            [self updateSleepAssertion:NO];
             dispatch_sync(self.captureQueue, ^{
                 [self teardownH264Encoder];
                 if (self->_latestPB) {
@@ -518,8 +591,16 @@ static void vtOutputCallback(void *outputCallbackRefCon,
                     if (startErr) {
                         fprintf(stderr, "[CaptureEngine] startCapture erro: %s\n", [[startErr localizedDescription] UTF8String]);
                     } else {
+                        [self updateSleepAssertion:YES];
                         fprintf(stderr, "[CaptureEngine] Captura 60 FPS ativa! Display=%u | Retina=%ux%u | H264=%ux%u\n",
                                 targetID, self.fbWidth, self.fbHeight, self.videoWidth, self.videoHeight);
+                        // Guarantee desktop wallpaper appears immediately even if SCStream's 1st frame was black!
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 350 * NSEC_PER_MSEC), self.engineQueue, ^{
+                            [self captureInitialDesktopSnapshotIfNeeded:targetID generation:gen];
+                        });
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 950 * NSEC_PER_MSEC), self.engineQueue, ^{
+                            [self captureInitialDesktopSnapshotIfNeeded:targetID generation:gen];
+                        });
                     }
                 }];
             });
@@ -539,6 +620,7 @@ static void vtOutputCallback(void *outputCallbackRefCon,
 - (void)shutdown {
     dispatch_sync(self.engineQueue, ^{
         self.generation++;
+        [self updateSleepAssertion:NO];
         if (self.stream) {
             [self.stream stopCaptureWithCompletionHandler:nil];
             self.stream = nil;
@@ -594,9 +676,29 @@ static void vtOutputCallback(void *outputCallbackRefCon,
     }
 
     if (_forceFullSync) {
+        // Check if newly created virtual display frame is still all-black before consuming _forceFullSync
+        CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+        const uint8_t *chkBase = (const uint8_t *)CVPixelBufferGetBaseAddress(pb);
+        size_t chkStride = CVPixelBufferGetBytesPerRow(pb);
+        BOOL nonBlack = NO;
+        for (int sy = 1; sy <= 4 && !nonBlack; sy++) {
+            size_t py = (h * (size_t)sy) / 5;
+            for (int sx = 1; sx <= 4; sx++) {
+                size_t px = (w * (size_t)sx) / 5;
+                const uint8_t *p = chkBase + py * chkStride + px * 4;
+                if (p[0] > 4 || p[1] > 4 || p[2] > 4) { nonBlack = YES; break; }
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+        if (!nonBlack && !_sentValidNonBlackFrame) {
+            return; // Wait for WindowServer to finish drawing the wallpaper!
+        }
+
         _forceFullSync = NO;
+        _sentValidNonBlackFrame = YES;
         _needsSharpen = NO;
         _inMotionBurst = NO;
+        _consecutiveHeavyFrames = 0;
         [self emitRetinaTilesFromPixelBuffer:pb fullSync:YES];
         return;
     }
@@ -637,24 +739,38 @@ static void vtOutputCallback(void *outputCallbackRefCon,
     }
 
     if (changedCount == 0) {
+        _consecutiveHeavyFrames = 0;
         CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
         return;
     }
 
-    BOOL heavyMotion = (changedCount > (totalTiles * 35) / 100);
+    // Only engage lossy H.264 / half-res motion during SUSTAINED full-screen video/scroll (>75% for >=3 frames)!
+    // Moving windows, switching tabs, coding and browsing stay 100% BIT-EXACT LOSSLESS 2048x1536 RETINA!
+    if (changedCount > (totalTiles * 75) / 100) {
+        _consecutiveHeavyFrames++;
+    } else {
+        _consecutiveHeavyFrames = 0;
+    }
+
+    BOOL heavyMotion = (_consecutiveHeavyFrames >= 3);
     BOOL hasH264 = [del hasH264Clients];
     BOOL hasTileOnly = [del hasTileOnlyClients];
 
     if (heavyMotion) {
+        if (!_inMotionBurst) {
+            // ALWAYS start every new H.264 burst with a clean IDR keyframe (prevents stale P-frame smearing!)
+            _forceH264Keyframe = YES;
+        }
         _inMotionBurst = YES;
         _needsSharpen = YES;
         _lastMotionUs = now_us();
 
-        // 1. Native iOS clients: Hardware VideoToolbox H.264 @ 60 FPS!
+        // 1. Native iOS clients: Hardware VideoToolbox H.264 @ 60 FPS — gated BEFORE encoding!
         if (hasH264 && _vtSession && _vtTransfer && _videoPBPool) {
             CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
-            [self encodeH264FrameFromPixelBuffer:pb];
-            // If PWA clients are also connected, re-lock for fast half-res RGB565 motion
+            if ([del canAcceptH264Frame]) {
+                [self encodeH264FrameFromPixelBuffer:pb];
+            }
             if (hasTileOnly) {
                 CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
                 [self emitFastMotionRGB565FromBase:(const uint8_t *)CVPixelBufferGetBaseAddress(pb)
@@ -666,7 +782,7 @@ static void vtOutputCallback(void *outputCallbackRefCon,
             return;
         }
 
-        // 2. PWA-only heavy motion: Half-res 16-bit RGB565 + LZ4 (ultra-fast 30-60 FPS!)
+        // 2. PWA-only heavy motion: Half-res 16-bit RGB565 + LZ4
         if (hasTileOnly) {
             [self emitFastMotionRGB565FromBase:srcBase stride:srcStride width:(int)w height:(int)h toTileOnly:NO];
             CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
@@ -674,7 +790,8 @@ static void vtOutputCallback(void *outputCallbackRefCon,
         }
     }
 
-    // Normal desktop / UI / typing / coding: 100% LOSSLESS 2048x1536 RETINA LZ4 BGRA TILES!
+    // Normal desktop / tab switches / window dragging / typing: 100% LOSSLESS 2048x1536 RETINA LZ4 BGRA!
+    _sentValidNonBlackFrame = YES;
     [self emitDirtyRetinaTilesFromBase:srcBase
                                 stride:srcStride
                                  width:(int)w

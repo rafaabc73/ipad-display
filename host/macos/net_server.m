@@ -825,6 +825,19 @@ static NSString *mime_type_for_path(NSString *path) {
     return any;
 }
 
+- (BOOL)canAcceptH264Frame {
+    __block BOOL ready = NO;
+    dispatch_sync(self.clientsQueue, ^{
+        for (ClientSession *c in self.clients) {
+            if (!c.closed && (c.caps & IPD2_CAP_H264) && c.pendingMotionFrames < 2) {
+                ready = YES;
+                break;
+            }
+        }
+    });
+    return ready;
+}
+
 - (void)captureEngineDidProduceTileBatch:(NSData *)packet
                                    flags:(uint8_t)flags
                                tileCount:(uint16_t)tileCount
@@ -875,8 +888,10 @@ static NSString *mime_type_for_path(NSString *path) {
                 [c enqueuePacketType:IPD2_MSG_H264_CONFIG flags:0 extra:0 seq:0
                              payload:self->_lastH264Config droppable:NO isMotion:NO];
             }
+            // NEVER drop an already-encoded H.264 P-frame (dropping breaks decoder ref frames -> colored blocks!)
+            // Backpressure is cleanly gated BEFORE encoding via canAcceptH264Frame.
             [c enqueuePacketType:IPD2_MSG_H264_FRAME flags:flags extra:0 seq:seq
-                         payload:framePayload droppable:!isKey isMotion:YES];
+                         payload:framePayload droppable:NO isMotion:YES];
         }
     });
 }

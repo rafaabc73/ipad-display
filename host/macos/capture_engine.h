@@ -7,6 +7,7 @@
 - (BOOL)hasActiveClients;
 - (BOOL)hasH264Clients;
 - (BOOL)hasTileOnlyClients;
+- (BOOL)canAcceptH264Frame;
 - (void)captureEngineDidProduceTileBatch:(NSData *)packet
                                    flags:(uint8_t)flags
                                tileCount:(uint16_t)tileCount
