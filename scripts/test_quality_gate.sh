@@ -6,11 +6,11 @@ cd "$ROOT_DIR"
 export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"
 
 echo "================================================================="
-echo "  🛡️  iPad Display Pro v2.0 — 6-Stage Automated Quality Gate"
+echo "  🛡️  iPad Display Pro v2.0 — 7-Stage Automated Quality Gate"
 echo "================================================================="
 
 # STAGE 1: Static & Multi-Platform Build Validation
-echo "[Stage 1/6] Validando ES5, CSS iOS 10, Go tests e binários..."
+echo "[Stage 1/7] Validando ES5, CSS iOS 10, Go tests e binários..."
 node --check public/app.js
 node -e '
 const fs = require("fs");
@@ -30,19 +30,31 @@ plutil -lint "dist/iPad Display.app/Contents/Info.plist" >/dev/null
 rm -rf /tmp/qg_ipa
 echo "  ✓ Stage 1 PASSED"
 
-# STAGE 2: Hardware H.264 Moving-Window Round-Trip Quality Gate
-echo "[Stage 2/6] Testando H.264 HW Encode -> Decode (30 frames janela em movimento + PSNR frame-exato)..."
+# STAGE 2: iOS GLDisplayView Coalescing, Starvation & Atomic-Sharpen Gate
+echo "[Stage 2/7] Testando fila coalescida iOS (anti-starvation 576->192 tiles + sharpen atômico + ACK)..."
+clang -O2 -fobjc-arc -framework Foundation scripts/test_ios_pipeline.m -o /tmp/test_ios_pipeline
+/tmp/test_ios_pipeline
+rm -f /tmp/test_ios_pipeline
+echo "  ✓ Stage 2 PASSED"
+
+# STAGE 3: Hardware H.264 Moving-Window Round-Trip Quality Gate
+echo "[Stage 3/7] Testando H.264 HW Encode -> Decode (30 frames janela em movimento + PSNR frame-exato)..."
 clang -O2 -fobjc-arc -framework Foundation -framework CoreGraphics -framework CoreVideo -framework CoreMedia -framework VideoToolbox -framework ImageIO -framework UniformTypeIdentifiers \
   scripts/test_h264_roundtrip.m -o /tmp/test_h264_roundtrip
 /tmp/test_h264_roundtrip
 rm -f /tmp/test_h264_roundtrip
-echo "  ✓ Stage 2 PASSED"
+echo "  ✓ Stage 3 PASSED"
 
-# Compile live secondary-screen motion animator for Stage 4
+# Compile live secondary-screen motion animator for Stage 5
 clang -O2 -fobjc-arc -framework Cocoa scripts/test_motion_window.m -o /tmp/test_motion_window
 
-# STAGE 3-6: Live Daemon E2E (Second 2048x1536 Non-Black + Live Motion H.264/Backpressure/Sharpen + Mirror 16:10 + WebSocket PWA)
-echo "[Stage 3-6/6] Rodando E2E ao vivo (Second Retina + Drag 60 FPS + Backpressure + Sharpen + Mirror + WebSocket)..."
+# STAGE 4-7: Live Daemon E2E (Second 2048x1536 Non-Black + Live Motion H.264/Backpressure/Sharpen + Mirror 16:10 + WebSocket PWA)
+if ioreg -n Root -d1 -a 2>/dev/null | grep -A1 CGSSessionScreenIsLocked | grep -q "<true/>"; then
+  echo "⚠️  Mac com tela bloqueada (CGSSessionScreenIsLocked=true): macOS bloqueia ScreenCaptureKit/CGVirtualDisplay com a tela travada."
+  echo "    Desbloqueie a tela do Mac e rode ./scripts/test_quality_gate.sh novamente para executar os estágios 4-7 ao vivo."
+  exit 3
+fi
+echo "[Stage 4-7/7] Rodando E2E ao vivo (Second Retina + Drag 60 FPS + Backpressure + Sharpen + Mirror + WebSocket)..."
 TEST_PORT_HTTP=18080
 TEST_PORT_TCP=13456
 ./bin/ipad-display-macos --headless --http-port $TEST_PORT_HTTP --tcp-port $TEST_PORT_TCP > /tmp/qg_host.log 2>&1 &
@@ -239,5 +251,5 @@ ws.close()
 PYEOF
 
 echo "================================================================="
-echo "  ✅ ALL 6 QUALITY GATE STAGES PASSED!"
+echo "  ✅ ALL 7 QUALITY GATE STAGES PASSED!"
 echo "================================================================="

@@ -97,6 +97,7 @@ static NSString *mime_type_for_path(NSString *path) {
 @property (atomic) uint16_t rttTenthMs;
 @property (atomic) uint64_t lastPingSentUs;
 @property (atomic) BOOL sentH264Config;
+@property (atomic) BOOL loggedFirstAck;
 @property (nonatomic, copy) void (^onDrain)(void);
 @end
 
@@ -677,6 +678,13 @@ static NSString *mime_type_for_path(NSString *path) {
             break;
         }
         case IPD2_MSG_FRAME_ACK: {
+            if (!session.loggedFirstAck) {
+                session.loggedFirstAck = YES;
+                uint32_t ackSeq = 0;
+                if (payload.length >= sizeof(uint32_t)) memcpy(&ackSeq, payload.bytes, sizeof(uint32_t));
+                fprintf(stderr, "[NetServer] Primeiro FRAME_ACK recebido de %s (seq=%u)\n",
+                        [session.peerLabel UTF8String], ackSeq);
+            }
             [session ackMotionFrame];
             [self.captureEngine signalClientReady];
             break;

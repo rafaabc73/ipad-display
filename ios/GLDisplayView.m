@@ -16,19 +16,19 @@
 @implementation DecodedTile
 @end
 
-// Weak target proxy so CADisplayLink never retains GLDisplayView
+@interface GLDisplayView (DisplayLinkInternal)
+- (void)onDisplayLink:(CADisplayLink *)link;
+@end
+
+// Weak target proxy so CADisplayLink never retains GLDisplayView (zero performSelector!)
 @interface DisplayLinkProxy : NSObject
-@property (nonatomic, weak) id target;
-@property (nonatomic) SEL selector;
+@property (nonatomic, weak) GLDisplayView *owner;
 @end
 @implementation DisplayLinkProxy
 - (void)tick:(CADisplayLink *)link {
-    id t = self.target;
-    if (t && [t respondsToSelector:self.selector]) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-        [t performSelector:self.selector withObject:link];
-#pragma clang diagnostic pop
+    GLDisplayView *v = self.owner;
+    if (v) {
+        [v onDisplayLink:link];
     } else {
         [link invalidate];
     }
@@ -67,10 +67,12 @@
     BOOL _hasRetinaContent;
     BOOL _hasVideoContent;
     BOOL _needsResize;
+    BOOL _notifiedVisible;
 
     // Thread-safe coalesced staging state drained ONCE per 60Hz CADisplayLink vsync!
+    // Keyed by (y<<16)|x so queue is MATHEMATICALLY BOUNDED to <= 192 tiles (zero starvation!)
     NSLock *_pendingLock;
-    NSMutableArray<DecodedTile *> *_pendingTiles;
+    NSMutableDictionary<NSNumber *, DecodedTile *> *_pendingTileMap;
     NSMutableArray<NSNumber *> *_pendingAckSeqs;
     uint16_t _pendingFrameW;
     uint16_t _pendingFrameH;
@@ -147,7 +149,7 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
         };
 
         _pendingLock = [[NSLock alloc] init];
-        _pendingTiles = [NSMutableArray arrayWithCapacity:64];
+        _pendingTileMap = [NSMutableDictionary dictionaryWithCapacity:192];
         _pendingAckSeqs = [NSMutableArray arrayWithCapacity:8];
         _decodeQueue = dispatch_queue_create("ipd2.ios.decode", DISPATCH_QUEUE_SERIAL);
         _activeImageRectInPoints = frame;
@@ -157,6 +159,13 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
         [self startDisplayLink];
     }
     return self;
+}
+
+- (void)didMoveToWindow {
+    [super didMoveToWindow];
+    if (self.window && !_displayLink) {
+        [self startDisplayLink];
+    }
 }
 
 - (void)dealloc {
@@ -171,8 +180,7 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
 - (void)startDisplayLink {
     if (_displayLink) return;
     DisplayLinkProxy *proxy = [[DisplayLinkProxy alloc] init];
-    proxy.target = self;
-    proxy.selector = @selector(onDisplayLink:);
+    proxy.owner = self;
     _displayLink = [CADisplayLink displayLinkWithTarget:proxy selector:@selector(tick:)];
     if ([_displayLink respondsToSelector:@selector(setPreferredFramesPerSecond:)]) {
         _displayLink.preferredFramesPerSecond = 60;
@@ -370,7 +378,7 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
         _displayLink = nil;
     }
     [_pendingLock lock];
-    [_pendingTiles removeAllObjects];
+    [_pendingTileMap removeAllObjects];
     [_pendingAckSeqs removeAllObjects];
     _pendingFullSyncReady = NO;
     if (_pendingVideoPB) { CVPixelBufferRelease(_pendingVideoPB); _pendingVideoPB = NULL; }
@@ -396,7 +404,7 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
 - (void)clearDisplay {
     dispatch_async(dispatch_get_main_queue(), ^{
         [self->_pendingLock lock];
-        [self->_pendingTiles removeAllObjects];
+        [self->_pendingTileMap removeAllObjects];
         [self->_pendingAckSeqs removeAllObjects];
         if (self->_pendingVideoPB) { CVPixelBufferRelease(self->_pendingVideoPB); self->_pendingVideoPB = NULL; }
         self->_pendingFullSyncReady = NO;
@@ -407,6 +415,7 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
         self->_hasRetinaContent = NO;
         self->_hasVideoContent = NO;
         self->_showVideoLayer = NO;
+        self->_notifiedVisible = NO;
         self->_retinaW = 0;
         self->_retinaH = 0;
         [self releaseVideoTexturesOnMain];
@@ -479,10 +488,12 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
             self->_pendingFrameW = bh.frameW;
             self->_pendingFrameH = bh.frameH;
         }
-        if (decoded.count > 0) {
-            [self->_pendingTiles addObjectsFromArray:decoded];
+        // Coalesce by (y<<16)|x -> mathematically bounded <= 192 tiles (ZERO starvation!)
+        for (DecodedTile *t in decoded) {
+            NSNumber *key = @(((uint32_t)t.y << 16) | (uint32_t)t.x);
+            self->_pendingTileMap[key] = t;
         }
-        // Only mark FULL_SYNC ready when END_OF_FRAME arrives so iPad switches atomically with ZERO partial strips!
+        // Only mark FULL_SYNC ready when END_OF_FRAME arrives so H.264 -> Retina flips atomically!
         if (isFullSync && isEOF) {
             self->_pendingFullSyncReady = YES;
         }
@@ -521,26 +532,33 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
 // 60 Hz VSync-coalesced Main Thread Render Tick (MAX 1 presentRenderbuffer per 16.6ms!)
 - (void)onDisplayLink:(CADisplayLink *)link {
     [_pendingLock lock];
-    if (!_needsRedraw && _pendingTiles.count == 0 && !_pendingVideoPB) {
+    if (!_needsRedraw && _pendingTileMap.count == 0 && !_pendingVideoPB && _pendingAckSeqs.count == 0) {
         [_pendingLock unlock];
         return;
     }
 
-    // Pace large Retina uploads (<= 48 tiles / 16.6ms tick) so PowerVR SGX554 never hitches UI!
-    NSUInteger maxTilesPerTick = (_showVideoLayer || !_hasRetinaContent) ? 48 : 64;
-    NSArray<DecodedTile *> *tiles = nil;
-    if (_pendingTiles.count > 0) {
-        if (_pendingTiles.count <= maxTilesPerTick) {
-            tiles = [_pendingTiles copy];
-            [_pendingTiles removeAllObjects];
+    // When showing H.264 video, pace background Retina sharpen uploads (<= 64 tiles/tick)
+    // so video never hitches. When on Retina (or initial connect), upload ALL coalesced tiles
+    // (<= 192 max) in ONE tight pass -> instant display, zero starvation!
+    NSMutableArray<DecodedTile *> *tiles = nil;
+    if (_pendingTileMap.count > 0) {
+        if (!_showVideoLayer || _pendingTileMap.count <= 64) {
+            tiles = [[_pendingTileMap allValues] mutableCopy];
+            [_pendingTileMap removeAllObjects];
         } else {
-            NSRange r = NSMakeRange(0, maxTilesPerTick);
-            tiles = [_pendingTiles subarrayWithRange:r];
-            [_pendingTiles removeObjectsInRange:r];
+            NSArray<NSNumber *> *allKeys = [_pendingTileMap allKeys];
+            NSUInteger take = MIN(allKeys.count, (NSUInteger)64);
+            tiles = [NSMutableArray arrayWithCapacity:take];
+            for (NSUInteger i = 0; i < take; i++) {
+                NSNumber *k = allKeys[i];
+                DecodedTile *t = _pendingTileMap[k];
+                if (t) [tiles addObject:t];
+                [_pendingTileMap removeObjectForKey:k];
+            }
         }
     }
 
-    BOOL queueEmpty = (_pendingTiles.count == 0);
+    BOOL queueEmpty = (_pendingTileMap.count == 0);
     uint16_t fw = _pendingFrameW;
     uint16_t fh = _pendingFrameH;
     BOOL reachedFullSync = (queueEmpty && _pendingFullSyncReady);
@@ -560,7 +578,6 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
     float curX = _cursorX;
     float curY = _cursorY;
     BOOL curVis = _cursorVisible;
-    // If more tiles remain for the next paced tick, stay dirty so we finish smoothly!
     _needsRedraw = !queueEmpty;
     [_pendingLock unlock];
 
@@ -576,8 +593,9 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
         [self rebuildRenderbufferOnMain];
     }
 
-    // 1. Upload paced lossless Retina tiles in ONE tight GL loop
+    // 1. Upload coalesced lossless Retina tiles in ONE tight GL loop
     if (tiles.count > 0 || (fw > 0 && fh > 0 && (fw != _retinaW || fh != _retinaH))) {
+        glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, _retinaTex);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
         if (fw > 0 && fh > 0 && (fw != _retinaW || fh != _retinaH)) {
@@ -591,10 +609,11 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
                                 GL_RGBA, GL_UNSIGNED_BYTE, t.pixels.bytes);
             }
         }
-        if (reachedFullSync || (!_showVideoLayer && queueEmpty)) {
+        if (tiles.count > 0 && (!_showVideoLayer || reachedFullSync)) {
             _hasRetinaContent = YES;
         }
         if (reachedFullSync && !videoPB) {
+            _hasRetinaContent = YES;
             _showVideoLayer = NO;
         }
     } else if (reachedFullSync && _hasRetinaContent && !videoPB) {
@@ -741,6 +760,14 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
     glBindRenderbuffer(GL_RENDERBUFFER, _colorRenderbuffer);
     [_context presentRenderbuffer:GL_RENDERBUFFER];
 
+    if (!_notifiedVisible) {
+        _notifiedVisible = YES;
+        NSLog(@"[GLDisplayView] Primeiro quadro apresentado! Retina=%ux%u Video=%ux%u Backing=%dx%d",
+              _retinaW, _retinaH, _videoW, _videoH, (int)_backingWidth, (int)_backingHeight);
+        if (self.onFirstFrameVisible) {
+            self.onFirstFrameVisible();
+        }
+    }
     if (ackSeqs.count > 0 && self.onFramePresented) {
         for (NSNumber *n in ackSeqs) {
             self.onFramePresented(n.unsignedIntValue);

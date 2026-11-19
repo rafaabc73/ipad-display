@@ -78,6 +78,9 @@
     self.glView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     self.glView.userInteractionEnabled = NO;
     __weak typeof(self) weakSelf = self;
+    self.glView.onFirstFrameVisible = ^{
+        [weakSelf markFrameRendered];
+    };
     self.glView.onFramePresented = ^(uint32_t seq) {
         [weakSelf.connection sendFrameAck:seq];
         [weakSelf markFrameRendered];
@@ -93,10 +96,8 @@
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
     [self.glView setNeedsLayout];
-    if (self.connection.isConnected) {
-        [self.connection sendControlCmd:IPD2_CTRL_REQUEST_SYNC arg1:0];
-    }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    // Fallback sync only if initial SET_MODE hasn't delivered a frame within 1.5s
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (!self->_hasFirstFrame && self.connection.isConnected) {
             [self.connection sendControlCmd:IPD2_CTRL_REQUEST_SYNC arg1:0];
         }
