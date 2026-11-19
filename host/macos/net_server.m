@@ -93,9 +93,11 @@ static NSString *mime_type_for_path(NSString *path) {
 @property (atomic) BOOL closed;
 @property (atomic) int32_t pendingMotionFrames;
 @property (atomic) int64_t queuedBytes;
+@property (atomic) uint64_t lastMotionSentUs;
 @property (atomic) uint16_t rttTenthMs;
 @property (atomic) uint64_t lastPingSentUs;
 @property (atomic) BOOL sentH264Config;
+@property (nonatomic, copy) void (^onDrain)(void);
 @end
 
 @implementation ClientSession
@@ -199,6 +201,7 @@ static NSString *mime_type_for_path(NSString *path) {
     __sync_add_and_fetch(&_queuedBytes, bytes);
     if (isMotion) {
         __sync_add_and_fetch(&_pendingMotionFrames, 1);
+        self.lastMotionSentUs = net_now_us();
     }
 
     dispatch_async(self.sendQueue, ^{
@@ -208,9 +211,11 @@ static NSString *mime_type_for_path(NSString *path) {
                                       seq:seq
                                   payload:payload.bytes
                                       len:(uint32_t)payload.length];
-        __sync_sub_and_fetch(&self->_queuedBytes, bytes);
+        int64_t remaining = __sync_sub_and_fetch(&self->_queuedBytes, bytes);
         if (!ok) {
             [self closeSession];
+        } else if (remaining < 128 * 1024 && self.onDrain) {
+            self.onDrain();
         }
     });
 }
@@ -442,6 +447,10 @@ static NSString *mime_type_for_path(NSString *path) {
     configure_client_socket(fd, usbDevID != 0);
     ClientSession *session = [[ClientSession alloc] initWithFd:fd isWS:isWS transport:transport label:label];
     session.usbDeviceID = usbDevID;
+    __weak typeof(self) weakSelf = self;
+    session.onDrain = ^{
+        [weakSelf.captureEngine signalClientReady];
+    };
 
     dispatch_sync(self.clientsQueue, ^{
         [self.clients addObject:session];
@@ -669,6 +678,7 @@ static NSString *mime_type_for_path(NSString *path) {
         }
         case IPD2_MSG_FRAME_ACK: {
             [session ackMotionFrame];
+            [self.captureEngine signalClientReady];
             break;
         }
         default:
@@ -825,11 +835,35 @@ static NSString *mime_type_for_path(NSString *path) {
     return any;
 }
 
-- (BOOL)canAcceptH264Frame {
+- (BOOL)canAcceptFrame {
     __block BOOL ready = NO;
+    uint64_t now = net_now_us();
     dispatch_sync(self.clientsQueue, ^{
         for (ClientSession *c in self.clients) {
-            if (!c.closed && (c.caps & IPD2_CAP_H264) && c.pendingMotionFrames < 2) {
+            if (c.closed) continue;
+            // Safety decay if an ACK was ever missed (>300ms) so encoder can never stall
+            if (c.pendingMotionFrames > 0 && now > c.lastMotionSentUs && (now - c.lastMotionSentUs) > 300000ULL) {
+                c.pendingMotionFrames = 0;
+            }
+            if (c.queuedBytes < 256 * 1024 && c.pendingMotionFrames < 2) {
+                ready = YES;
+                break;
+            }
+        }
+    });
+    return ready;
+}
+
+- (BOOL)canAcceptH264Frame {
+    __block BOOL ready = NO;
+    uint64_t now = net_now_us();
+    dispatch_sync(self.clientsQueue, ^{
+        for (ClientSession *c in self.clients) {
+            if (c.closed || !(c.caps & IPD2_CAP_H264)) continue;
+            if (c.pendingMotionFrames > 0 && now > c.lastMotionSentUs && (now - c.lastMotionSentUs) > 300000ULL) {
+                c.pendingMotionFrames = 0;
+            }
+            if (c.queuedBytes < 256 * 1024 && c.pendingMotionFrames < 2) {
                 ready = YES;
                 break;
             }
@@ -844,6 +878,7 @@ static NSString *mime_type_for_path(NSString *path) {
                               toH264Only:(BOOL)h264Only
                             toTileOnly:(BOOL)tileOnly {
     BOOL isMotion = (flags & IPD2_TILE_FLAG_HALF_RES) != 0;
+    BOOL isFrameEnd = (flags & IPD2_TILE_FLAG_END_OF_FRAME) != 0;
     uint32_t seq = __sync_add_and_fetch(&_seqCounter, 1);
 
     dispatch_async(self.clientsQueue, ^{
@@ -852,14 +887,15 @@ static NSString *mime_type_for_path(NSString *path) {
             BOOL isH264 = (c.caps & IPD2_CAP_H264) != 0;
             if (h264Only && !isH264) continue;
             if (tileOnly && isH264) continue;
-            // Lossless Retina tiles are reliable (droppable=NO); half-res motion frames are droppable!
+            // Lossless Retina tiles are reliable (droppable=NO); track END_OF_FRAME in pendingMotionFrames
+            // so Mac paces strictly to iPad's real GPU presentation speed (max 2 frames in flight)!
             [c enqueuePacketType:IPD2_MSG_TILE_BATCH
                            flags:flags
                            extra:tileCount
                              seq:seq
                          payload:packet
                        droppable:isMotion
-                        isMotion:isMotion];
+                        isMotion:(isMotion || isFrameEnd)];
         }
     });
 }

@@ -74,8 +74,9 @@ enum IPD2Position {
 };
 
 // Tile batch flags (IPD2Header.flags)
-#define IPD2_TILE_FLAG_FULL_SYNC  (1 << 0) // Switch renderer back to crisp Retina tile texture
-#define IPD2_TILE_FLAG_HALF_RES   (1 << 1) // Half-res motion frame (upscale cleanly on GPU)
+#define IPD2_TILE_FLAG_FULL_SYNC    (1 << 0) // Switch renderer back to crisp Retina tile texture
+#define IPD2_TILE_FLAG_HALF_RES     (1 << 1) // Half-res motion frame (upscale cleanly on GPU)
+#define IPD2_TILE_FLAG_END_OF_FRAME (1 << 2) // Final sub-batch of frame (client sends FRAME_ACK)
 
 // H264 frame flags (IPD2Header.flags)
 #define IPD2_H264_FLAG_KEYFRAME   (1 << 0)

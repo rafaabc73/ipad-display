@@ -7,6 +7,7 @@
 - (BOOL)hasActiveClients;
 - (BOOL)hasH264Clients;
 - (BOOL)hasTileOnlyClients;
+- (BOOL)canAcceptFrame;
 - (BOOL)canAcceptH264Frame;
 - (void)captureEngineDidProduceTileBatch:(NSData *)packet
                                    flags:(uint8_t)flags
@@ -37,6 +38,7 @@
 
 - (void)setMode:(uint8_t)mode preset:(uint8_t)preset position:(uint8_t)position;
 - (void)requestFullSync;
+- (void)signalClientReady;
 - (void)fillDisplayInfo:(IPD2DisplayInfo *)info transport:(uint8_t)transport rttTenthMs:(uint16_t)rtt;
 - (void)shutdown;
 

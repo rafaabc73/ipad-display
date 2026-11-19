@@ -562,6 +562,9 @@
           off += clen;
         }
         activeIsMotion = false;
+        if ((flags & 4) !== 0) {
+          sendFrameAck(seq);
+        }
       } else {
         sendFrameAck(seq);
       }
@@ -639,8 +642,11 @@
         }
         off += dlen;
       }
-      if ((flags & TILE_FLAG_FULL_SYNC) !== 0 || !activeIsMotion) {
+      if (((flags & TILE_FLAG_FULL_SYNC) !== 0 && (flags & 4) !== 0) || !activeIsMotion) {
         activeIsMotion = false;
+      }
+      if ((flags & 4) !== 0) {
+        sendFrameAck(seq);
       }
     }
 

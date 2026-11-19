@@ -6,6 +6,7 @@
 @interface VideoDecoder () {
     VTDecompressionSessionRef _session;
     CMVideoFormatDescriptionRef _formatDesc;
+    NSLock *_lock;
 }
 @property (nonatomic, readwrite) uint16_t videoWidth;
 @property (nonatomic, readwrite) uint16_t videoHeight;
@@ -32,11 +33,19 @@ static void vtDecodeCallback(void *decompressionOutputRefCon,
 
 @implementation VideoDecoder
 
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _lock = [[NSLock alloc] init];
+    }
+    return self;
+}
+
 - (void)dealloc {
     [self reset];
 }
 
-- (void)reset {
+- (void)resetLocked {
     if (_session) {
         VTDecompressionSessionInvalidate(_session);
         CFRelease(_session);
@@ -53,20 +62,31 @@ static void vtDecodeCallback(void *decompressionOutputRefCon,
     self.lastPPS = nil;
 }
 
+- (void)reset {
+    [_lock lock];
+    [self resetLocked];
+    [_lock unlock];
+}
+
 - (BOOL)configureWithSPS:(const uint8_t *)sps spsLen:(size_t)spsLen
                      pps:(const uint8_t *)pps ppsLen:(size_t)ppsLen
                    width:(uint16_t)width height:(uint16_t)height {
-    if (!sps || spsLen == 0 || !pps || ppsLen == 0) return NO;
+    [_lock lock];
+    if (!sps || spsLen == 0 || !pps || ppsLen == 0) {
+        [_lock unlock];
+        return NO;
+    }
 
     NSData *newSPS = [NSData dataWithBytes:sps length:spsLen];
     NSData *newPPS = [NSData dataWithBytes:pps length:ppsLen];
     if (_session && self.isReady &&
         [self.lastSPS isEqualToData:newSPS] &&
         [self.lastPPS isEqualToData:newPPS]) {
+        [_lock unlock];
         return YES;
     }
 
-    [self reset];
+    [self resetLocked];
 
     const uint8_t *paramSets[2] = { sps, pps };
     const size_t paramSizes[2] = { spsLen, ppsLen };
@@ -80,6 +100,7 @@ static void vtDecodeCallback(void *decompressionOutputRefCon,
         &_formatDesc
     );
     if (st != noErr || !_formatDesc) {
+        [_lock unlock];
         return NO;
     }
 
@@ -105,7 +126,8 @@ static void vtDecodeCallback(void *decompressionOutputRefCon,
 
     if (st != noErr || !_session) {
         NSLog(@"[VideoDecoder] VTDecompressionSessionCreate FAILED: %d (%ux%u)", (int)st, width, height);
-        [self reset];
+        [self resetLocked];
+        [_lock unlock];
         return NO;
     }
 
@@ -117,11 +139,16 @@ static void vtDecodeCallback(void *decompressionOutputRefCon,
     self.videoWidth = width;
     self.videoHeight = height;
     self.isReady = YES;
+    [_lock unlock];
     return YES;
 }
 
 - (BOOL)decodeAVCCData:(const uint8_t *)data length:(size_t)length ptsUs:(uint64_t)ptsUs {
-    if (!_session || !_formatDesc || !data || length == 0) return NO;
+    [_lock lock];
+    if (!_session || !_formatDesc || !data || length == 0) {
+        [_lock unlock];
+        return NO;
+    }
 
     // Copy into CMBlockBuffer owned memory so decode is 100% memory-safe
     CMBlockBufferRef blockBuf = NULL;
@@ -136,11 +163,15 @@ static void vtDecodeCallback(void *decompressionOutputRefCon,
         0,
         &blockBuf
     );
-    if (st != noErr || !blockBuf) return NO;
+    if (st != noErr || !blockBuf) {
+        [_lock unlock];
+        return NO;
+    }
 
     st = CMBlockBufferReplaceDataBytes(data, blockBuf, 0, length);
     if (st != noErr) {
         CFRelease(blockBuf);
+        [_lock unlock];
         return NO;
     }
 
@@ -164,7 +195,10 @@ static void vtDecodeCallback(void *decompressionOutputRefCon,
     );
     CFRelease(blockBuf);
 
-    if (st != noErr || !sampleBuf) return NO;
+    if (st != noErr || !sampleBuf) {
+        [_lock unlock];
+        return NO;
+    }
 
     VTDecodeFrameFlags flags = 0; // Synchronous low-latency decode!
     VTDecodeInfoFlags outFlags = 0;
@@ -173,9 +207,11 @@ static void vtDecodeCallback(void *decompressionOutputRefCon,
 
     if (st == kVTInvalidSessionErr || st == kVTVideoDecoderMalfunctionErr) {
         // App returned from background -> re-create session cleanly on next config
-        [self reset];
+        [self resetLocked];
+        [_lock unlock];
         return NO;
     }
+    [_lock unlock];
     return (st == noErr);
 }
 

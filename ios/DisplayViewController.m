@@ -77,6 +77,11 @@
     self.glView = [[GLDisplayView alloc] initWithFrame:self.view.bounds];
     self.glView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     self.glView.userInteractionEnabled = NO;
+    __weak typeof(self) weakSelf = self;
+    self.glView.onFramePresented = ^(uint32_t seq) {
+        [weakSelf.connection sendFrameAck:seq];
+        [weakSelf markFrameRendered];
+    };
     [self.view addSubview:self.glView];
 
     [self buildLoaderUI];
@@ -269,7 +274,7 @@
 
 - (void)onBack {
     [self.kbField resignFirstResponder];
-    [self.glView clearDisplay];
+    [self.glView teardownGL];
     [self.videoDecoder reset];
     [self.delegate displayViewControllerDidRequestBack:self];
 }
@@ -345,8 +350,7 @@
 }
 
 - (void)handleTileBatch:(NSData *)payload flags:(uint8_t)flags tileCount:(uint16_t)tileCount seq:(uint32_t)seq {
-    [self.glView applyTileBatchData:payload flags:flags tileCount:tileCount];
-    [self markFrameRendered];
+    [self.glView applyTileBatchData:payload flags:flags tileCount:tileCount seq:seq];
 }
 
 - (void)handleH264Config:(NSData *)payload {

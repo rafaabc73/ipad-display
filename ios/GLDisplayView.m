@@ -16,6 +16,25 @@
 @implementation DecodedTile
 @end
 
+// Weak target proxy so CADisplayLink never retains GLDisplayView
+@interface DisplayLinkProxy : NSObject
+@property (nonatomic, weak) id target;
+@property (nonatomic) SEL selector;
+@end
+@implementation DisplayLinkProxy
+- (void)tick:(CADisplayLink *)link {
+    id t = self.target;
+    if (t && [t respondsToSelector:self.selector]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        [t performSelector:self.selector withObject:link];
+#pragma clang diagnostic pop
+    } else {
+        [link invalidate];
+    }
+}
+@end
+
 @interface GLDisplayView () {
     CAEAGLLayer *_eaglLayer;
     EAGLContext *_context;
@@ -49,10 +68,20 @@
     BOOL _hasVideoContent;
     BOOL _needsResize;
 
+    // Thread-safe coalesced staging state drained ONCE per 60Hz CADisplayLink vsync!
+    NSLock *_pendingLock;
+    NSMutableArray<DecodedTile *> *_pendingTiles;
+    NSMutableArray<NSNumber *> *_pendingAckSeqs;
+    uint16_t _pendingFrameW;
+    uint16_t _pendingFrameH;
+    BOOL _pendingFullSyncReady;
+    CVPixelBufferRef _pendingVideoPB;
     float _cursorX;
     float _cursorY;
     BOOL _cursorVisible;
+    BOOL _needsRedraw;
 
+    CADisplayLink *_displayLink;
     dispatch_queue_t _decodeQueue;
 }
 @property (nonatomic, readwrite) CGRect activeImageRectInPoints;
@@ -117,11 +146,15 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
             kEAGLDrawablePropertyColorFormat: kEAGLColorFormatRGBA8
         };
 
+        _pendingLock = [[NSLock alloc] init];
+        _pendingTiles = [NSMutableArray arrayWithCapacity:64];
+        _pendingAckSeqs = [NSMutableArray arrayWithCapacity:8];
         _decodeQueue = dispatch_queue_create("ipd2.ios.decode", DISPATCH_QUEUE_SERIAL);
         _activeImageRectInPoints = frame;
         _needsResize = YES;
 
         [self setupGLOnMain];
+        [self startDisplayLink];
     }
     return self;
 }
@@ -135,11 +168,23 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
 - (int)backingWidth { return (int)_backingWidth; }
 - (int)backingHeight { return (int)_backingHeight; }
 
+- (void)startDisplayLink {
+    if (_displayLink) return;
+    DisplayLinkProxy *proxy = [[DisplayLinkProxy alloc] init];
+    proxy.target = self;
+    proxy.selector = @selector(onDisplayLink:);
+    _displayLink = [CADisplayLink displayLinkWithTarget:proxy selector:@selector(tick:)];
+    if ([_displayLink respondsToSelector:@selector(setPreferredFramesPerSecond:)]) {
+        _displayLink.preferredFramesPerSecond = 60;
+    }
+    [_displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+}
+
 - (void)setFillScreen:(BOOL)fillScreen {
     _fillScreen = fillScreen;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self renderCurrentFrameOnMain];
-    });
+    [_pendingLock lock];
+    _needsRedraw = YES;
+    [_pendingLock unlock];
 }
 
 - (void)layoutSubviews {
@@ -147,10 +192,11 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
     _eaglLayer.contentsScale = [UIScreen mainScreen].scale;
     _needsResize = YES;
     [self rebuildRenderbufferOnMain];
-    [self renderCurrentFrameOnMain];
+    [_pendingLock lock];
+    _needsRedraw = YES;
+    [_pendingLock unlock];
 }
 
-// ALL OpenGL ES + CAEAGLLayer calls run strictly on the Main Thread per Apple CoreAnimation rules!
 - (void)setupGLOnMain {
     _context = [[EAGLContext alloc] initWithAPI:kEAGLRenderingAPIOpenGLES2];
     if (!_context || ![EAGLContext setCurrentContext:_context]) {
@@ -245,7 +291,6 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
 
     [self buildRetinaCursorTextureOnMain];
     CVOpenGLESTextureCacheCreate(kCFAllocatorDefault, NULL, _context, NULL, &_textureCache);
-    NSLog(@"[GLDisplayView] OpenGL ES 2.0 initialized (programs: bgra=%u yuv=%u cur=%u)", _bgraProgram, _yuvProgram, _cursorProgram);
 }
 
 - (void)buildRetinaCursorTextureOnMain {
@@ -302,15 +347,10 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
         glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, _colorRenderbuffer);
         glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_WIDTH, &_backingWidth);
         glGetRenderbufferParameteriv(GL_RENDERBUFFER, GL_RENDERBUFFER_HEIGHT, &_backingHeight);
-        GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-        if (status == GL_FRAMEBUFFER_COMPLETE && _backingWidth > 0 && _backingHeight > 0) {
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE &&
+            _backingWidth > 0 && _backingHeight > 0) {
             _needsResize = NO;
-            NSLog(@"[GLDisplayView] Framebuffer OK: %dx%d", (int)_backingWidth, (int)_backingHeight);
-        } else {
-            NSLog(@"[GLDisplayView] Framebuffer incomplete: 0x%x (%dx%d)", status, (int)_backingWidth, (int)_backingHeight);
         }
-    } else {
-        NSLog(@"[GLDisplayView] renderbufferStorage:fromDrawable: FAILED!");
     }
 }
 
@@ -325,6 +365,17 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
         dispatch_sync(dispatch_get_main_queue(), ^{ [self teardownGL]; });
         return;
     }
+    if (_displayLink) {
+        [_displayLink invalidate];
+        _displayLink = nil;
+    }
+    [_pendingLock lock];
+    [_pendingTiles removeAllObjects];
+    [_pendingAckSeqs removeAllObjects];
+    _pendingFullSyncReady = NO;
+    if (_pendingVideoPB) { CVPixelBufferRelease(_pendingVideoPB); _pendingVideoPB = NULL; }
+    [_pendingLock unlock];
+
     if (_context) {
         [EAGLContext setCurrentContext:_context];
         [self releaseVideoTexturesOnMain];
@@ -344,10 +395,18 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
 
 - (void)clearDisplay {
     dispatch_async(dispatch_get_main_queue(), ^{
+        [self->_pendingLock lock];
+        [self->_pendingTiles removeAllObjects];
+        [self->_pendingAckSeqs removeAllObjects];
+        if (self->_pendingVideoPB) { CVPixelBufferRelease(self->_pendingVideoPB); self->_pendingVideoPB = NULL; }
+        self->_pendingFullSyncReady = NO;
+        self->_needsRedraw = NO;
+        self->_cursorVisible = NO;
+        [self->_pendingLock unlock];
+
         self->_hasRetinaContent = NO;
         self->_hasVideoContent = NO;
         self->_showVideoLayer = NO;
-        self->_cursorVisible = NO;
         self->_retinaW = 0;
         self->_retinaH = 0;
         [self releaseVideoTexturesOnMain];
@@ -364,8 +423,8 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
     });
 }
 
-// Decompress LZ4 tiles on background queue, upload & draw strictly on Main Thread!
-- (void)applyTileBatchData:(NSData *)payload flags:(uint8_t)flags tileCount:(uint16_t)tileCount {
+// Decompress LZ4 tiles on background queue; NEVER spam presentRenderbuffer per sub-batch!
+- (void)applyTileBatchData:(NSData *)payload flags:(uint8_t)flags tileCount:(uint16_t)tileCount seq:(uint32_t)seq {
     if (!payload || payload.length < sizeof(IPD2TileBatchHeader)) return;
     if (flags & IPD2_TILE_FLAG_HALF_RES) return;
 
@@ -412,119 +471,192 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
             off += th.dataLen;
         }
 
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (!self->_context) return;
-            if (![EAGLContext setCurrentContext:self->_context]) return;
-            if (self->_needsResize || self->_backingWidth <= 0) [self rebuildRenderbufferOnMain];
+        BOOL isEOF = (flags & IPD2_TILE_FLAG_END_OF_FRAME) != 0;
+        BOOL isFullSync = (flags & IPD2_TILE_FLAG_FULL_SYNC) != 0;
 
-            glBindTexture(GL_TEXTURE_2D, self->_retinaTex);
-            glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-
-            if (bh.frameW > 0 && bh.frameH > 0 && (bh.frameW != self->_retinaW || bh.frameH != self->_retinaH)) {
-                self->_retinaW = bh.frameW;
-                self->_retinaH = bh.frameH;
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, self->_retinaW, self->_retinaH,
-                             0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-                GLenum err = glGetError();
-                NSLog(@"[GLDisplayView] Allocated Retina texture %ux%u (glErr=0x%x)", self->_retinaW, self->_retinaH, err);
-            }
-
-            for (DecodedTile *t in decoded) {
-                glTexSubImage2D(GL_TEXTURE_2D, 0, t.x, t.y, t.w, t.h,
-                                GL_RGBA, GL_UNSIGNED_BYTE, t.pixels.bytes);
-            }
-
-            self->_hasRetinaContent = YES;
-            if ((flags & IPD2_TILE_FLAG_FULL_SYNC) || !self->_showVideoLayer) {
-                self->_showVideoLayer = NO;
-            }
-            [self renderCurrentFrameOnMain];
-        });
+        [self->_pendingLock lock];
+        if (bh.frameW > 0 && bh.frameH > 0) {
+            self->_pendingFrameW = bh.frameW;
+            self->_pendingFrameH = bh.frameH;
+        }
+        if (decoded.count > 0) {
+            [self->_pendingTiles addObjectsFromArray:decoded];
+        }
+        // Only mark FULL_SYNC ready when END_OF_FRAME arrives so iPad switches atomically with ZERO partial strips!
+        if (isFullSync && isEOF) {
+            self->_pendingFullSyncReady = YES;
+        }
+        if (isEOF) {
+            [self->_pendingAckSeqs addObject:@(seq)];
+        }
+        self->_needsRedraw = YES;
+        [self->_pendingLock unlock];
     });
 }
 
+// Keep ONLY the newest decoded H.264 CVPixelBuffer for the next 60 Hz vsync!
 - (void)displayH264PixelBuffer:(CVPixelBufferRef)pixelBuffer {
     if (!pixelBuffer) return;
     CVPixelBufferRetain(pixelBuffer);
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (!self->_context || !self->_textureCache) {
-            CVPixelBufferRelease(pixelBuffer);
-            return;
-        }
-        if (![EAGLContext setCurrentContext:self->_context]) {
-            CVPixelBufferRelease(pixelBuffer);
-            return;
-        }
-        if (self->_needsResize || self->_backingWidth <= 0) [self rebuildRenderbufferOnMain];
-
-        [self releaseVideoTexturesOnMain];
-
-        size_t w0 = CVPixelBufferGetWidthOfPlane(pixelBuffer, 0);
-        size_t h0 = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0);
-        size_t w1 = CVPixelBufferGetWidthOfPlane(pixelBuffer, 1);
-        size_t h1 = CVPixelBufferGetHeightOfPlane(pixelBuffer, 1);
-        if (w0 == 0 || h0 == 0 || w1 == 0 || h1 == 0) {
-            CVPixelBufferRelease(pixelBuffer);
-            return;
-        }
-        self->_videoW = (uint16_t)w0;
-        self->_videoH = (uint16_t)h0;
-
-        glActiveTexture(GL_TEXTURE0);
-        CVReturn r1 = CVOpenGLESTextureCacheCreateTextureFromImage(
-            kCFAllocatorDefault, self->_textureCache, pixelBuffer, NULL,
-            GL_TEXTURE_2D, GL_LUMINANCE, (GLsizei)w0, (GLsizei)h0,
-            GL_LUMINANCE, GL_UNSIGNED_BYTE, 0, &self->_lumaTexture
-        );
-        glActiveTexture(GL_TEXTURE1);
-        CVReturn r2 = CVOpenGLESTextureCacheCreateTextureFromImage(
-            kCFAllocatorDefault, self->_textureCache, pixelBuffer, NULL,
-            GL_TEXTURE_2D, GL_LUMINANCE_ALPHA, (GLsizei)w1, (GLsizei)h1,
-            GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, 1, &self->_chromaTexture
-        );
-
-        if (r1 == kCVReturnSuccess && r2 == kCVReturnSuccess && self->_lumaTexture && self->_chromaTexture) {
-            glBindTexture(CVOpenGLESTextureGetTarget(self->_lumaTexture), CVOpenGLESTextureGetName(self->_lumaTexture));
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
-            glBindTexture(CVOpenGLESTextureGetTarget(self->_chromaTexture), CVOpenGLESTextureGetName(self->_chromaTexture));
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
-            self->_hasVideoContent = YES;
-            self->_showVideoLayer = YES;
-            [self renderCurrentFrameOnMain];
-        }
-        CVPixelBufferRelease(pixelBuffer);
-    });
+    [_pendingLock lock];
+    if (_pendingVideoPB) {
+        CVPixelBufferRelease(_pendingVideoPB);
+    }
+    _pendingVideoPB = pixelBuffer;
+    // New H.264 motion supersedes any older pending sharpen flip
+    _pendingFullSyncReady = NO;
+    _needsRedraw = YES;
+    [_pendingLock unlock];
 }
 
 - (void)updateCursor:(IPD2Cursor)cursor {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        self->_cursorX = cursor.normX;
-        self->_cursorY = cursor.normY;
-        self->_cursorVisible = (cursor.visible != 0);
-        if (self->_hasRetinaContent || self->_hasVideoContent) {
-            [self renderCurrentFrameOnMain];
-        }
-    });
+    [_pendingLock lock];
+    _cursorX = cursor.normX;
+    _cursorY = cursor.normY;
+    _cursorVisible = (cursor.visible != 0);
+    _needsRedraw = YES;
+    [_pendingLock unlock];
 }
 
-- (void)renderCurrentFrameOnMain {
-    if (!_context) return;
+// 60 Hz VSync-coalesced Main Thread Render Tick (MAX 1 presentRenderbuffer per 16.6ms!)
+- (void)onDisplayLink:(CADisplayLink *)link {
+    [_pendingLock lock];
+    if (!_needsRedraw && _pendingTiles.count == 0 && !_pendingVideoPB) {
+        [_pendingLock unlock];
+        return;
+    }
+
+    // Pace large Retina uploads (<= 48 tiles / 16.6ms tick) so PowerVR SGX554 never hitches UI!
+    NSUInteger maxTilesPerTick = (_showVideoLayer || !_hasRetinaContent) ? 48 : 64;
+    NSArray<DecodedTile *> *tiles = nil;
+    if (_pendingTiles.count > 0) {
+        if (_pendingTiles.count <= maxTilesPerTick) {
+            tiles = [_pendingTiles copy];
+            [_pendingTiles removeAllObjects];
+        } else {
+            NSRange r = NSMakeRange(0, maxTilesPerTick);
+            tiles = [_pendingTiles subarrayWithRange:r];
+            [_pendingTiles removeObjectsInRange:r];
+        }
+    }
+
+    BOOL queueEmpty = (_pendingTiles.count == 0);
+    uint16_t fw = _pendingFrameW;
+    uint16_t fh = _pendingFrameH;
+    BOOL reachedFullSync = (queueEmpty && _pendingFullSyncReady);
+    if (reachedFullSync) {
+        _pendingFullSyncReady = NO;
+    }
+
+    NSArray<NSNumber *> *ackSeqs = nil;
+    if (queueEmpty && _pendingAckSeqs.count > 0) {
+        ackSeqs = [_pendingAckSeqs copy];
+        [_pendingAckSeqs removeAllObjects];
+    }
+
+    CVPixelBufferRef videoPB = _pendingVideoPB;
+    _pendingVideoPB = NULL;
+
+    float curX = _cursorX;
+    float curY = _cursorY;
+    BOOL curVis = _cursorVisible;
+    // If more tiles remain for the next paced tick, stay dirty so we finish smoothly!
+    _needsRedraw = !queueEmpty;
+    [_pendingLock unlock];
+
+    if (!_context) {
+        if (videoPB) CVPixelBufferRelease(videoPB);
+        return;
+    }
+    if (![EAGLContext setCurrentContext:_context]) {
+        if (videoPB) CVPixelBufferRelease(videoPB);
+        return;
+    }
     if (_needsResize || _backingWidth <= 0 || _backingHeight <= 0) {
         [self rebuildRenderbufferOnMain];
     }
-    if (_backingWidth <= 0 || _backingHeight <= 0) return;
-    if (![EAGLContext setCurrentContext:_context]) return;
 
+    // 1. Upload paced lossless Retina tiles in ONE tight GL loop
+    if (tiles.count > 0 || (fw > 0 && fh > 0 && (fw != _retinaW || fh != _retinaH))) {
+        glBindTexture(GL_TEXTURE_2D, _retinaTex);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        if (fw > 0 && fh > 0 && (fw != _retinaW || fh != _retinaH)) {
+            _retinaW = fw;
+            _retinaH = fh;
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, _retinaW, _retinaH, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        }
+        for (DecodedTile *t in tiles) {
+            if ((uint32_t)t.x + t.w <= _retinaW && (uint32_t)t.y + t.h <= _retinaH) {
+                glTexSubImage2D(GL_TEXTURE_2D, 0, t.x, t.y, t.w, t.h,
+                                GL_RGBA, GL_UNSIGNED_BYTE, t.pixels.bytes);
+            }
+        }
+        if (reachedFullSync || (!_showVideoLayer && queueEmpty)) {
+            _hasRetinaContent = YES;
+        }
+        if (reachedFullSync && !videoPB) {
+            _showVideoLayer = NO;
+        }
+    } else if (reachedFullSync && _hasRetinaContent && !videoPB) {
+        _showVideoLayer = NO;
+    }
+
+    // 2. Bind latest zero-copy Hardware H.264 NV12 frame if present
+    if (videoPB && _textureCache) {
+        [self releaseVideoTexturesOnMain];
+        size_t w0 = CVPixelBufferGetWidthOfPlane(videoPB, 0);
+        size_t h0 = CVPixelBufferGetHeightOfPlane(videoPB, 0);
+        size_t w1 = CVPixelBufferGetWidthOfPlane(videoPB, 1);
+        size_t h1 = CVPixelBufferGetHeightOfPlane(videoPB, 1);
+        if (w0 > 0 && h0 > 0 && w1 > 0 && h1 > 0) {
+            _videoW = (uint16_t)w0;
+            _videoH = (uint16_t)h0;
+            glActiveTexture(GL_TEXTURE0);
+            CVReturn r1 = CVOpenGLESTextureCacheCreateTextureFromImage(
+                kCFAllocatorDefault, _textureCache, videoPB, NULL,
+                GL_TEXTURE_2D, GL_LUMINANCE, (GLsizei)w0, (GLsizei)h0,
+                GL_LUMINANCE, GL_UNSIGNED_BYTE, 0, &_lumaTexture
+            );
+            glActiveTexture(GL_TEXTURE1);
+            CVReturn r2 = CVOpenGLESTextureCacheCreateTextureFromImage(
+                kCFAllocatorDefault, _textureCache, videoPB, NULL,
+                GL_TEXTURE_2D, GL_LUMINANCE_ALPHA, (GLsizei)w1, (GLsizei)h1,
+                GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, 1, &_chromaTexture
+            );
+            if (r1 == kCVReturnSuccess && r2 == kCVReturnSuccess && _lumaTexture && _chromaTexture) {
+                glBindTexture(CVOpenGLESTextureGetTarget(_lumaTexture), CVOpenGLESTextureGetName(_lumaTexture));
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+                glBindTexture(CVOpenGLESTextureGetTarget(_chromaTexture), CVOpenGLESTextureGetName(_chromaTexture));
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+                _hasVideoContent = YES;
+                _showVideoLayer = YES;
+            }
+        }
+        CVPixelBufferRelease(videoPB);
+    }
+
+    // 3. Draw & present ONCE for this 60 Hz vsync!
+    if (_backingWidth <= 0 || _backingHeight <= 0) {
+        if (ackSeqs.count > 0 && self.onFramePresented) {
+            for (NSNumber *n in ackSeqs) self.onFramePresented(n.unsignedIntValue);
+        }
+        return;
+    }
     BOOL useVideo = (_showVideoLayer && _hasVideoContent && _lumaTexture && _chromaTexture);
-    if (!useVideo && !_hasRetinaContent) return;
+    if (!useVideo && !_hasRetinaContent) {
+        if (ackSeqs.count > 0 && self.onFramePresented) {
+            for (NSNumber *n in ackSeqs) self.onFramePresented(n.unsignedIntValue);
+        }
+        return;
+    }
 
     float srcW = useVideo ? (float)_videoW : (float)_retinaW;
     float srcH = useVideo ? (float)_videoH : (float)_retinaH;
@@ -536,9 +668,7 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
         float dstAspect = (float)_backingWidth / (float)_backingHeight;
         if (dstAspect > srcAspect) {
             sx = srcAspect / dstAspect;
-            sy = 1.0f;
         } else {
-            sx = 1.0f;
             sy = dstAspect / srcAspect;
         }
     }
@@ -587,7 +717,7 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     }
 
-    if (_cursorVisible && _cursorTex && _cursorProgram) {
+    if (curVis && _cursorTex && _cursorProgram) {
         glEnable(GL_BLEND);
         glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
         glUseProgram(_cursorProgram);
@@ -597,8 +727,8 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
 
         float cwNdc = 40.0f / (float)_backingWidth;
         float chNdc = 56.0f / (float)_backingHeight;
-        float tipNdcX = ((_cursorX * 2.0f - 1.0f) * sx);
-        float tipNdcY = ((1.0f - _cursorY * 2.0f) * sy);
+        float tipNdcX = ((curX * 2.0f - 1.0f) * sx);
+        float tipNdcY = ((1.0f - curY * 2.0f) * sy);
         float offX = tipNdcX + cwNdc - (6.0f / (float)_backingWidth);
         float offY = tipNdcY - chNdc + (6.0f / (float)_backingHeight);
 
@@ -610,6 +740,12 @@ static GLuint link_program(const char *vsSrc, const char *fsSrc) {
 
     glBindRenderbuffer(GL_RENDERBUFFER, _colorRenderbuffer);
     [_context presentRenderbuffer:GL_RENDERBUFFER];
+
+    if (ackSeqs.count > 0 && self.onFramePresented) {
+        for (NSNumber *n in ackSeqs) {
+            self.onFramePresented(n.unsignedIntValue);
+        }
+    }
 }
 
 @end

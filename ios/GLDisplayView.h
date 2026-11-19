@@ -10,8 +10,9 @@
 @property (nonatomic, readonly) uint16_t retinaHeight;
 @property (nonatomic, readonly) int backingWidth;
 @property (nonatomic, readonly) int backingHeight;
+@property (nonatomic, copy) void (^onFramePresented)(uint32_t seq);
 
-- (void)applyTileBatchData:(NSData *)payload flags:(uint8_t)flags tileCount:(uint16_t)tileCount;
+- (void)applyTileBatchData:(NSData *)payload flags:(uint8_t)flags tileCount:(uint16_t)tileCount seq:(uint32_t)seq;
 - (void)displayH264PixelBuffer:(CVPixelBufferRef)pixelBuffer;
 - (void)updateCursor:(IPD2Cursor)cursor;
 - (void)clearDisplay;
