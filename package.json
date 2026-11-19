@@ -1,21 +1,24 @@
 {
-  "name": "ipad-display",
-  "version": "1.0.0",
-  "description": "Transforme seu iPad antigo (iOS 10+) em um segundo monitor Retina para macOS com zero delay via cabo USB.",
-  "main": "src/server.js",
+  "name": "ipad-display-pro",
+  "version": "2.0.0",
+  "description": "Transforme qualquer iPad (inclusive iPad 4 / iOS 10.3.3) em Segunda Tela Retina 2048x1536 ou Espelhamento a 60 FPS para macOS e Windows via cabo USB ou Wi-Fi.",
   "scripts": {
     "start": "./start.sh",
-    "server": "node src/server.js"
+    "build": "./scripts/build_all.sh",
+    "build:ios": "./ios/build_ipa.sh"
   },
   "keywords": [
     "ipad",
     "second-display",
-    "virtual-display",
-    "screencapturekit",
+    "retina",
+    "hidpi",
+    "videotoolbox",
+    "h264",
+    "usbmuxd",
+    "webgl",
+    "lz4",
     "macos",
-    "mjpeg",
-    "pwa",
-    "sidecar"
+    "windows"
   ],
   "author": "rafaabc73",
   "license": "MIT"

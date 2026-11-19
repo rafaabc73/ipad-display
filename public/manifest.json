@@ -1,10 +1,10 @@
 {
-  "name": "iPad Segunda Tela",
-  "short_name": "iPad Tela",
+  "name": "iPad Display Pro",
+  "short_name": "iPad Display",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#ffffff",
-  "theme_color": "#ffffff",
+  "background_color": "#0b0d12",
+  "theme_color": "#0b0d12",
   "orientation": "landscape",
   "icons": [
     {
@@ -19,4 +19,3 @@
     }
   ]
 }
-

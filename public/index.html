@@ -3,173 +3,159 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <title>iPad Segunda Tela</title>
+  <title>iPad Display Pro</title>
 
-  <!-- Configurações PWA e Web Clip para iPad / iOS 10.3.3 -->
+  <!-- Web App / Tela Cheia iOS 10.3.3+ -->
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="apple-mobile-web-app-title" content="Monitor iPad">
+  <meta name="apple-mobile-web-app-title" content="iPad Display">
   <meta name="format-detection" content="telephone=no">
   <link rel="apple-touch-icon" href="/icon-192.png">
   <link rel="apple-touch-icon" sizes="192x192" href="/icon-192.png">
   <link rel="apple-touch-icon" sizes="512x512" href="/icon-512.png">
   <link rel="manifest" href="/manifest.json">
-
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
 
-  <!-- TELA 1: MENU BRANCO COM OS DOIS QUADROS -->
+  <!-- TELA 1: MENU PRINCIPAL -->
   <main id="menuView" class="view menu-view">
     <header class="header">
       <div class="brand">
         <div class="brand-icon">
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="3" width="20" height="14" rx="2"></rect>
             <line x1="8" y1="21" x2="16" y2="21"></line>
             <line x1="12" y1="17" x2="12" y2="21"></line>
           </svg>
         </div>
-        <span class="brand-text">iPad Display</span>
+        <div class="brand-titles">
+          <span class="brand-text">iPad Display Pro</span>
+          <span id="hostSubtitle" class="brand-sub">Conectando ao computador...</span>
+        </div>
       </div>
 
-      <div class="connection-status">
+      <div id="connPill" class="conn-pill conn-connecting">
         <span class="status-dot"></span>
-        <span id="connectionLabel">Cabo USB Conectado (0.6ms)</span>
+        <span id="connLabel">Conectando...</span>
       </div>
     </header>
 
     <div class="container">
       <div class="intro">
-        <h1 class="title">Escolha como usar seu iPad</h1>
-        <p class="subtitle">Selecione uma das opções abaixo para mudar a tela instantaneamente</p>
+        <h1 class="title">Escolha o modo de tela</h1>
+        <p class="subtitle">Motor Retina 2048×1536 Lossless + Cursor 60 Hz independente</p>
       </div>
 
-      <!-- OS DOIS QUADROS DE ESCOLHA -->
-      <div class="cards-grid">
-        
-        <!-- QUADRO 1: DUPLICAR TELA -->
-        <div id="cardMirror" class="card" role="button" tabindex="0">
-          <div class="card-glow"></div>
-          <div class="card-header">
-            <div class="card-icon mirror-icon">
-              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <div class="cards-row">
+        <!-- CARD 1: SEGUNDA TELA -->
+        <div id="cardSecond" class="card card-second" role="button" tabindex="0">
+          <div class="card-top">
+            <div class="card-icon icon-green">
+              <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="2" y="4" width="9" height="16" rx="2"></rect>
+                <rect x="13" y="4" width="9" height="16" rx="2"></rect>
+              </svg>
+            </div>
+            <span class="badge badge-green">Monitor Estendido</span>
+          </div>
+
+          <h2 class="card-title">Segunda Tela</h2>
+          <p class="card-desc">Cria um monitor Retina HiDPI 2× independente (2048×1536 1:1). Arraste janelas livremente para o iPad.</p>
+
+          <ul class="feature-list">
+            <li>Nitidez Retina pixel-a-pixel (sem borrão JPEG)</li>
+            <li>Arraste, toque, clique direito e rolagem 2 dedos</li>
+          </ul>
+
+          <div class="card-cta cta-green">Ativar Segunda Tela</div>
+        </div>
+
+        <!-- CARD 2: ESPELHAR TELA -->
+        <div id="cardMirror" class="card card-mirror" role="button" tabindex="0">
+          <div class="card-top">
+            <div class="card-icon icon-blue">
+              <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <rect x="2" y="4" width="13" height="11" rx="2"></rect>
                 <rect x="9" y="9" width="13" height="11" rx="2"></rect>
               </svg>
             </div>
-            <span class="card-badge">Espelhamento</span>
+            <span class="badge badge-blue">Espelhamento</span>
           </div>
 
-          <h2 class="card-title">Duplicar Tela</h2>
-          <p class="card-desc">Mostra exatamente a tela principal do seu computador no iPad em tempo real com zero delay.</p>
+          <h2 class="card-title">Espelhar Tela</h2>
+          <p class="card-desc">Duplica a tela principal do computador em tempo real preservando a proporção exata sem distorção.</p>
 
-          <ul class="card-features">
-            <li>
-              <svg class="check-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
-              Transmissão instantânea por cabo USB (0.6ms)
-            </li>
-            <li>
-              <svg class="check-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
-              Ideal para apresentações e acompanhamento
-            </li>
+          <ul class="feature-list">
+            <li>Remove o monitor virtual automaticamente</li>
+            <li>Ideal para acompanhar, apresentar ou controlar</li>
           </ul>
 
-          <button class="card-btn btn-mirror">
-            <span>Iniciar Espelhamento</span>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>
-          </button>
+          <div class="card-cta cta-blue">Iniciar Espelhamento</div>
         </div>
+      </div>
 
-        <!-- QUADRO 2: SEGUNDA TELA -->
-        <div id="cardSecond" class="card" role="button" tabindex="0">
-          <div class="card-glow"></div>
-          <div class="card-header">
-            <div class="card-icon second-icon">
-              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <rect x="3" y="5" width="8" height="14" rx="1.5"></rect>
-                <rect x="13" y="5" width="8" height="14" rx="1.5"></rect>
-                <circle cx="7" cy="17" r="0.8"></circle>
-                <circle cx="17" cy="17" r="0.8"></circle>
-              </svg>
-            </div>
-            <span class="card-badge badge-green">Monitor Estendido</span>
-          </div>
-
-          <h2 class="card-title">Segunda Tela</h2>
-          <p class="card-desc">Cria um monitor virtual independente de Alta Definição (4:3) no Mac.</p>
-
-          <ul class="card-features">
-            <li>
-              <svg class="check-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
-              Espaço de trabalho independente no Mac
-            </li>
-            <li>
-              <svg class="check-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>
-              Arraste pastas, navegadores e programas
-            </li>
-          </ul>
-
-          <button class="card-btn btn-second">
-            <span>Ativar 2ª Tela</span>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>
-          </button>
+      <!-- CONFIGURAÇÕES RÁPIDAS -->
+      <div class="quick-bar">
+        <div class="quick-group">
+          <span class="quick-label">Qualidade:</span>
+          <button type="button" class="pill-opt active" data-preset="0">Retina 1:1 (2048×1536)</button>
+          <button type="button" class="pill-opt" data-preset="1">Mais Espaço (1280×960 @2×)</button>
+          <button type="button" class="pill-opt" data-preset="2">Wi-Fi Rápido</button>
         </div>
-
+        <div class="quick-group">
+          <span class="quick-label">Posição:</span>
+          <button type="button" class="pos-opt active" data-pos="0">Direita</button>
+          <button type="button" class="pos-opt" data-pos="1">Esquerda</button>
+          <button type="button" class="pos-opt" data-pos="2">Acima</button>
+          <button type="button" class="pos-opt" data-pos="3">Abaixo</button>
+        </div>
       </div>
 
       <footer class="tip-footer">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
-        <span>Dica: Para tela cheia sem barras de navegação, toque em <strong>Compartilhar</strong> no Safari e escolha <strong>"Adicionar à Tela de Início"</strong>.</span>
+        Para tela cheia sem barras no Safari: toque em <strong>Compartilhar</strong> e escolha <strong>"Adicionar à Tela de Início"</strong>.
       </footer>
     </div>
   </main>
 
-  <!-- TELA 2: VISUALIZADOR DE STREAMING DE HARDWARE (ZERO DELAY) -->
-  <div id="streamView" class="view stream-view hidden">
-    <!-- Renderizador contínuo nativo com aceleração por hardware e zero delay -->
-    <div id="streamContainer" class="stream-container">
-      <img id="streamImg" class="stream-img" alt="Transmissão da Tela do Computador">
+  <!-- TELA 2: DISPLAY WEBGL RETINA -->
+  <div id="displayView" class="view display-view hidden">
+    <canvas id="glCanvas" class="gl-canvas"></canvas>
+
+    <!-- Cursor nativo 60 Hz independente -->
+    <div id="remoteCursor" class="remote-cursor hidden">
+      <svg width="20" height="28" viewBox="0 0 20 28" fill="none">
+        <path d="M1.5 1.5L1.5 22.5L6.8 17.5L10.8 25.5L13.8 24.0L9.8 16.0L16.5 16.0L1.5 1.5Z"
+              fill="#000000" stroke="#FFFFFF" stroke-width="1.8" stroke-linejoin="round"/>
+      </svg>
     </div>
 
-    <!-- Indicador de Carregamento inicial -->
+    <!-- Loader -->
     <div id="streamLoader" class="stream-loader">
       <div class="spinner"></div>
-      <p id="loaderText">Conectando ao monitor do Mac...</p>
+      <p id="loaderText">Sincronizando tela Retina...</p>
     </div>
 
-    <!-- Barra de Controles Flutuante Superior -->
-    <div id="streamControls" class="floating-controls">
-      <button id="btnBack" class="ctrl-btn back-btn" title="Voltar ao Menu">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
-        <span>Menu</span>
-      </button>
+    <!-- Alça discreta no topo para abrir/fechar controles -->
+    <button type="button" id="toolbarHandle" class="toolbar-handle" title="Controles">
+      <span class="handle-bar"></span>
+    </button>
 
-      <div class="ctrl-info">
-        <span id="streamModeBadge" class="mode-pill">Espelhando</span>
-        <span id="fpsBadge" class="fps-pill">HD Retina • Zero Delay</span>
-      </div>
-
-      <div class="ctrl-actions">
-        <!-- Resolução e Desempenho -->
-        <button id="btnQualityToggle" class="ctrl-btn action-btn active" title="Alternar Resolução">
-          <span id="qualityLabel">🔥 Alta Definição</span>
-        </button>
-
-        <button id="btnFitToggle" class="ctrl-btn action-btn" title="Alternar Ajustar ou Preencher Tela">
-          <span id="fitLabel">Ajustar</span>
-        </button>
-
-        <button id="btnTouchToggle" class="ctrl-btn action-btn active" title="Ativar/Desativar Toque como Clique">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"></path></svg>
-          <span id="touchLabel">Toque</span>
-        </button>
-
-        <button id="btnFullscreen" class="ctrl-btn icon-only" title="Alternar Tela Cheia">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"></path></svg>
-        </button>
-      </div>
+    <!-- Barra Flutuante de Controles -->
+    <div id="floatingBar" class="floating-bar">
+      <button type="button" id="btnBack" class="ctrl-btn btn-primary">Menu</button>
+      <button type="button" id="btnSwitchMode" class="ctrl-btn">Trocar Modo</button>
+      <span id="hudStats" class="hud-stats">Retina 2048×1536</span>
+      <button type="button" id="btnPreset" class="ctrl-btn">Retina 1:1</button>
+      <button type="button" id="btnFit" class="ctrl-btn">Ajustar</button>
+      <button type="button" id="btnTouch" class="ctrl-btn active">Toque: On</button>
+      <button type="button" id="btnKeyboard" class="ctrl-btn">Teclado</button>
+      <button type="button" id="btnHideBar" class="ctrl-btn">Ocultar</button>
     </div>
+
+    <!-- Input oculto para acionar o teclado nativo do iPad -->
+    <input id="hiddenKeyboardInput" type="text" class="hidden-kb-input"
+           autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
   </div>
 
   <script src="/app.js"></script>

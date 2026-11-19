@@ -1,17 +1,14 @@
 # macOS
 .DS_Store
 
-# Certificados SSL/TLS gerados automaticamente
-*.pem
+# Build temporários
+.build/
+host/windows/web/
 
-# Binários compilados (gerados pelo start.sh)
-bin/ipad-display-core
+# Binários compilados
+bin/
+dist/
 
-# Arquivos temporários e de testes
-scratch/
-*.log
+# Fotos / testes locais
 WhatsApp*
-
-# Node.js
-node_modules/
-npm-debug.log*
+*.log
