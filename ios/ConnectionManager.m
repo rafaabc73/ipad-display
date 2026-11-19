@@ -30,9 +30,13 @@ static BOOL ios_read_all(int fd, void *buf, size_t len) {
         ssize_t n = recv(fd, p + got, len - got, 0);
         if (n < 0) {
             if (errno == EINTR) continue;
+            NSLog(@"[ConnectionManager] recv error: %s", strerror(errno));
             return NO;
         }
-        if (n == 0) return NO;
+        if (n == 0) {
+            NSLog(@"[ConnectionManager] peer closed EOF");
+            return NO;
+        }
         got += (size_t)n;
     }
     return YES;
@@ -284,9 +288,13 @@ static void ios_tune_socket(int fd) {
         if (!ios_read_all(fd, &hdr, sizeof(hdr))) break;
         if (hdr.magic[0] != IPD2_MAGIC_0 || hdr.magic[1] != IPD2_MAGIC_1 ||
             hdr.magic[2] != IPD2_MAGIC_2 || hdr.magic[3] != IPD2_MAGIC_3) {
+            NSLog(@"[ConnectionManager] Bad magic: %02x %02x %02x %02x", hdr.magic[0], hdr.magic[1], hdr.magic[2], hdr.magic[3]);
             break;
         }
-        if (hdr.payloadLen > 16 * 1024 * 1024) break;
+        if (hdr.payloadLen > 16 * 1024 * 1024) {
+            NSLog(@"[ConnectionManager] Payload too large: %u", hdr.payloadLen);
+            break;
+        }
 
         NSMutableData *payload = nil;
         if (hdr.payloadLen > 0) {

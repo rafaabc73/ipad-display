@@ -104,11 +104,13 @@ static void vtDecodeCallback(void *decompressionOutputRefCon,
     );
 
     if (st != noErr || !_session) {
+        NSLog(@"[VideoDecoder] VTDecompressionSessionCreate FAILED: %d (%ux%u)", (int)st, width, height);
         [self reset];
         return NO;
     }
 
     VTSessionSetProperty(_session, kVTDecompressionPropertyKey_RealTime, kCFBooleanTrue);
+    NSLog(@"[VideoDecoder] Hardware H.264 ready (%ux%u)", width, height);
 
     self.lastSPS = newSPS;
     self.lastPPS = newPPS;

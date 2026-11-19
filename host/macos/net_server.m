@@ -22,9 +22,13 @@ static BOOL sock_write_all(int fd, const void *buf, size_t len) {
     const uint8_t *p = (const uint8_t *)buf;
     size_t sent = 0;
     while (sent < len) {
-        ssize_t n = send(fd, p + sent, len - sent, 0);
+        // Chunk writes to <= 16KB so usbmuxd's AF_UNIX pseudo-TCP buffer never overflows!
+        size_t chunk = len - sent;
+        if (chunk > 16384) chunk = 16384;
+        ssize_t n = send(fd, p + sent, chunk, 0);
         if (n < 0) {
             if (errno == EINTR) continue;
+            fprintf(stderr, "[NetServer] sock_write_all erro (fd=%d, sent=%zu/%zu): %s\n", fd, sent, len, strerror(errno));
             return NO;
         }
         if (n == 0) return NO;
@@ -40,6 +44,7 @@ static BOOL sock_read_all(int fd, void *buf, size_t len) {
         ssize_t n = recv(fd, p + got, len - got, 0);
         if (n < 0) {
             if (errno == EINTR) continue;
+            fprintf(stderr, "[NetServer] sock_read_all erro (fd=%d): %s\n", fd, strerror(errno));
             return NO;
         }
         if (n == 0) return NO;
@@ -48,14 +53,15 @@ static BOOL sock_read_all(int fd, void *buf, size_t len) {
     return YES;
 }
 
-static void configure_client_socket(int fd) {
+static void configure_client_socket(int fd, BOOL isUnixMux) {
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
-    int sndBuf = 1024 * 1024;
-    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndBuf, sizeof(sndBuf));
-    // 10s write timeout so dead sockets never hang the send queue
+    if (!isUnixMux) {
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+        setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
+        int sndBuf = 512 * 1024;
+        setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndBuf, sizeof(sndBuf));
+    }
     struct timeval tv = { .tv_sec = 10, .tv_usec = 0 };
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 }
@@ -433,7 +439,7 @@ static NSString *mime_type_for_path(NSString *path) {
                transport:(uint8_t)transport
              usbDeviceID:(uint32_t)usbDevID
                    label:(NSString *)label {
-    configure_client_socket(fd);
+    configure_client_socket(fd, usbDevID != 0);
     ClientSession *session = [[ClientSession alloc] initWithFd:fd isWS:isWS transport:transport label:label];
     session.usbDeviceID = usbDevID;
 
@@ -673,7 +679,7 @@ static NSString *mime_type_for_path(NSString *path) {
 #pragma mark - HTTP & WebSocket Upgrade Handler
 
 - (void)handleHTTPConnection:(int)fd peerIP:(NSString *)peerIP {
-    configure_client_socket(fd);
+    configure_client_socket(fd, NO);
 
     char reqBuf[8192];
     size_t total = 0;

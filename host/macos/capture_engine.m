@@ -759,7 +759,7 @@ static void vtOutputCallback(void *outputCallbackRefCon,
             }
             countInBatch++;
 
-            if (countInBatch >= 32) {
+            if (countInBatch >= 8 || batch.length >= 60 * 1024) {
                 uint8_t flags = fullSync ? IPD2_TILE_FLAG_FULL_SYNC : 0;
                 [del captureEngineDidProduceTileBatch:[batch copy]
                                                 flags:flags
